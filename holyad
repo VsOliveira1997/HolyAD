@@ -100,6 +100,39 @@ def handle_report():
     display_response(response, "session report")
     print(f"  report saved to session/report.md")
 
+def auto_save_findings(response: str, session):
+    """Extract key findings section from Claude response and save to context."""
+    marker = "## Key findings from this analysis"
+    if marker not in response:
+        return
+
+    findings_section = response.split(marker)[-1].strip()
+    lines = findings_section.split("\n")
+
+    new_findings = []
+    for line in lines:
+        line = line.strip()
+        if line.startswith("-") and len(line) > 2:
+            finding = line[1:].strip()
+            if finding:
+                new_findings.append(finding)
+        elif line.startswith("##"):
+            break  # stop at next section
+
+    if not new_findings:
+        return
+
+    ctx = session.load()
+    existing = ctx.get("findings", [])
+    for f in new_findings:
+        if f not in existing:
+            existing.append(f)
+    ctx["findings"] = existing
+    session.save(ctx)
+    update_claude_md(ctx)
+
+    print(f"  [holyad] {len(new_findings)} finding(s) saved to context")
+
 def handle_input(args: list):
     session = Session()
     ctx = session.load()
@@ -154,6 +187,9 @@ def handle_input(args: list):
     response = send_to_claude(message, first_call=first_call)
     session.log_response(response)
     display_response(response, " ".join(args))
+
+    # auto-extract and save key findings from claude's response
+    auto_save_findings(response, session)
 
 def handle_add(args: list):
     if not args:
