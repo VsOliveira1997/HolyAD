@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+# holyad — HTB Active Directory assistant
+# usage:
+#   holyad --start <ip> [user:password]     → init session
+#   holyad <tool> [args...]                  → run tool + analyze output
+#   holyad file1.txt [file2.txt ...]         → send files to agent
+#   holyad --report                          → generate session report
+
+import sys
+import os
+import subprocess
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from session import Session
+from filter import Filter
+import config
+
+HOLYAD_DIR = os.path.expanduser("~/.holyad")
+CLAUDE_MD_LOCAL = os.path.join(os.getcwd(), "CLAUDE.md")
+os.makedirs(HOLYAD_DIR, exist_ok=True)
+CLAUDE_MD = os.path.join(HOLYAD_DIR, "CLAUDE.md")
+
+
+def send_to_claude(message: str, first_call: bool = False) -> str:
+    # system prompt lives in CLAUDE.md in cwd — no need to pass as arg
+    cmd = ["claude", "--dangerously-skip-permissions"]
+    if first_call:
+        cmd += ["-p"]
+    else:
+        cmd += ["-c", "-p"]
+
+    proc = subprocess.run(cmd, input=message, capture_output=True, text=True)
+    return proc.stdout.strip()
+
+def display_response(response: str, label: str = ""):
+    print()
+    print("━" * 60)
+    if label:
+        print(f"  {label}")
+        print("━" * 60)
+    print()
+    print(response)
+    print()
+
+def update_claude_md(ctx: dict):
+    """Update CLAUDE.md with system prompt + session context for caching."""
+    lines = [
+        f"{config.SYSTEM_PROMPT}\n\n",
+        "# HolyAD Session Context\n\n",
+        f"- **Target IP:** {ctx['target']}\n",
+        f"- **Type:** {ctx['type']}\n",
+    ]
+    if ctx.get('user'):
+        lines.append(f"- **Username:** {ctx['user']}\n")
+    if ctx.get('pass'):
+        lines.append(f"- **Password:** {ctx['pass']}\n")
+    if ctx.get('domain'):
+        lines.append(f"- **Domain:** {ctx['domain']}\n")
+    if ctx.get('findings'):
+        lines.append(f"\n## Findings so far\n")
+        for f in ctx['findings']:
+            lines.append(f"- {f}\n")
+
+    # write to current dir so Claude Code auto-reads it
+    with open(os.path.join(os.getcwd(), "CLAUDE.md"), "w") as f:
+        f.writelines(lines)
+
+def handle_start(args: list):
+    if not args:
+        print("usage: holyad --start <ip> [user:password]")
+        sys.exit(1)
+
+    ip = args[0]
+    credentials = args[1] if len(args) > 1 else None
+
+    session = Session()
+    session.init(ip, credentials)
+    ctx = session.load()
+    update_claude_md(ctx)
+
+    print(f"\n  session started")
+    print(f"  target : {ip}")
+    print(f"  type   : {ctx['type']}")
+    if ctx.get('user'):
+        print(f"  user   : {ctx['user']}")
+    print()
+
+def handle_report():
+    session = Session()
+    ctx = session.load()
+
+    if not ctx.get("target"):
+        print("error: no active session")
+        sys.exit(1)
+
+    message = "Generate a concise pentest report for this HTB session based on everything we've done. Include: techniques used, why they worked, what was found, and lessons learned."
+    response = send_to_claude(message, first_call=False)
+    session.save_report(response)
+    display_response(response, "session report")
+    print(f"  report saved to session/report.md")
+
+def handle_input(args: list):
+    session = Session()
+    ctx = session.load()
+
+    if not ctx.get("target"):
+        print("error: no active session — run 'holyad --start <ip>' first")
+        sys.exit(1)
+
+    # detect if args are all files
+    all_files = all(os.path.isfile(a) for a in args)
+
+    if all_files:
+        # ── file mode ────────────────────────────────────────────
+        payload = ""
+        for filepath in args:
+            filename = os.path.basename(filepath)
+            with open(filepath, "r", errors="replace") as f:
+                content = f.read()
+            payload += f"=== {filename} ===\n{content}\n\n"
+
+        message = f"Analyze the following tool output(s) and suggest the next step:\n\n{payload}"
+
+    else:
+        # ── command mode ──────────────────────────────────────────
+        print(f"\n  running: {' '.join(args)}\n")
+
+        # run command with live output
+        output_lines = []
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        for line in proc.stdout:
+            print(line, end="")
+            output_lines.append(line)
+        proc.wait()
+
+        output = "".join(output_lines)
+
+        if not Filter.should_send(output, " ".join(args)):
+            print("\n  [holyad] output filtered — nothing relevant to analyze")
+            return
+
+        # save output to file for reference
+        outfile = os.path.join(HOLYAD_DIR, "last_output.txt")
+        with open(outfile, "w") as f:
+            f.write(f"command: {' '.join(args)}\n\n{output}")
+
+        message = f"Analyze this output and suggest the next step:\n\ncommand: {' '.join(args)}\n\n{output}"
+
+    # first call check — if no session history yet use first_call=True
+    history_file = os.path.expanduser(f"~/.claude/projects/-{CLAUDE_MD.replace('/', '-')}/sessions-index.json")
+    first_call = not os.path.exists(history_file)
+
+    response = send_to_claude(message, first_call=first_call)
+    session.log_response(response)
+    display_response(response, " ".join(args))
+
+def handle_add(args: list):
+    if not args:
+        print("usage: holyad --add \"finding description\"")
+        sys.exit(1)
+
+    finding = " ".join(args)
+    session = Session()
+    ctx = session.load()
+
+    if not ctx.get("target"):
+        print("error: no active session — run 'holyad --start <ip>' first")
+        sys.exit(1)
+
+    ctx.setdefault("findings", []).append(finding)
+    session.save(ctx)
+    update_claude_md(ctx)
+
+    print(f"\n  finding saved: {finding}\n")
+
+def main():
+    args = sys.argv[1:]
+
+    if not args:
+        print("usage:")
+        print("  holyad --start <ip> [user:password]")
+        print("  holyad <tool> [args...]")
+        print("  holyad file1.txt [file2.txt ...]")
+        print("  holyad --report")
+        print("  holyad --add \"finding description\"")
+        sys.exit(0)
+
+    if args[0] == "--start":
+        handle_start(args[1:])
+    elif args[0] == "--report":
+        handle_report()
+    elif args[0] == "--add":
+        handle_add(args[1:])
+    else:
+        handle_input(args)
+
+if __name__ == "__main__":
+    main()
