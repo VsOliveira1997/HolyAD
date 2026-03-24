@@ -1,0 +1,2 @@
+__pycache__/
+sudo timedatectl set-ntp off

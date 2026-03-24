@@ -1,39 +1,165 @@
 #!/usr/bin/env python3
 # holyad — HTB Active Directory assistant
 # usage:
-#   holyad --start <ip> [user:password]     → init session
-#   holyad <tool> [args...]                  → run tool + analyze output
-#   holyad file1.txt [file2.txt ...]         → send files to agent
-#   holyad --report                          → generate session report
+#   holyad --start <ip> [user:password]
+#   holyad <tool> [args...]
+#   holyad file1.json [file2.json ...]
+#   holyad --add "note"
+#   holyad --report
 
-import sys
-import os
-import subprocess
+import sys, os, subprocess, json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from session import Session
 from filter import Filter
-import config
 
-HOLYAD_DIR = os.path.expanduser("~/.holyad")
-CLAUDE_MD_LOCAL = os.path.join(os.getcwd(), "CLAUDE.md")
-os.makedirs(HOLYAD_DIR, exist_ok=True)
-CLAUDE_MD = os.path.join(HOLYAD_DIR, "CLAUDE.md")
+HOLYAD_BASE = os.path.expanduser("~/.holyad")
+SKILLS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+
+# bloodhound file extensions — triggers dedicated persistence
+BH_EXTENSIONS = {".json", ".zip"}
+BH_KEYWORDS   = {"computers", "users", "groups", "domains", "gpos", "ous",
+                 "containers", "bloodhound", "sharphound", "rusthound"}
+
+SYSTEM_PROMPT = """You are HolyAD — HTB Active Directory pentesting instructor.
+
+Rules:
+- HTB machines have ONE intended path. Think: what did the creator want to teach?
+- If a path is blocked or marked as rabbit hole: DROP IT IMMEDIATELY, never return to it.
+- Commands must use real values from context — never placeholders.
+- BloodHound shows POSSIBLE paths, not guaranteed ones. Cross-reference with --add notes.
+- End every response with:
+## Key findings
+- one bullet per new discovery (users, ports, hashes, ACLs, misconfigs, credentials)
+- References: https://0xdf.gitlab.io"""
 
 
-def send_to_claude(message: str, first_call: bool = False) -> str:
-    # system prompt lives in CLAUDE.md in cwd — no need to pass as arg
-    cmd = ["claude", "--dangerously-skip-permissions"]
-    if first_call:
-        cmd += ["-p"]
-    else:
-        cmd += ["-c", "-p"]
+def is_bloodhound_file(filepath):
+    name = os.path.basename(filepath).lower()
+    ext  = os.path.splitext(name)[1]
+    return ext in BH_EXTENSIONS and any(kw in name for kw in BH_KEYWORDS)
 
-    proc = subprocess.run(cmd, input=message, capture_output=True, text=True)
+
+def session_dir_for(ip):
+    return os.path.join(HOLYAD_BASE, ip)
+
+
+def write_claude_md(session_dir, ctx):
+    """CLAUDE.md — full context rebuilt on every write. Stateless calls rely on this."""
+    ip       = ctx.get("target", "")
+    user     = ctx.get("user", "")
+    password = ctx.get("pass", "")
+    domain   = ctx.get("domain", "")
+    done     = ctx.get("sent_commands", [])
+    notes    = ctx.get("notes", [])       # --add entries (rabbit holes, observations)
+    findings = ctx.get("findings", [])    # auto-extracted from Claude responses
+
+    d = domain or "<domain>"
+    lines = [SYSTEM_PROMPT, "\n\n"]
+
+    # ── credentials ───────────────────────────────────────────────
+    lines.append("# Session\n")
+    lines.append(f"- IP: `{ip}`\n")
+    if user:     lines.append(f"- User: `{user}`\n")
+    if password: lines.append(f"- Password: `{password}`\n")
+    if domain:   lines.append(f"- Domain: `{domain}`\n")
+    if user and password:
+        cred = f"{domain}\\{user}:{password}" if domain else f"{user}:{password}"
+        lines.append(f"- Full cred: `{cred}`\n")
+
+    # ── user notes / rabbit holes (--add) — HIGH WEIGHT ──────────
+    if notes:
+        lines.append("\n# ⚠️ User Notes & Rabbit Holes — READ CAREFULLY\n")
+        lines.append("These are confirmed observations from the user. Treat them as ground truth.\n\n")
+        for n in notes:
+            lines.append(f"- {n}\n")
+
+    # ── bloodhound analysis — persistent, always present ─────────
+    bh_path = os.path.join(session_dir, "bloodhound.md")
+    if os.path.exists(bh_path):
+        with open(bh_path) as f:
+            bh_content = f.read().strip()
+        if bh_content:
+            lines.append("\n# BloodHound Analysis\n")
+            lines.append("⚠️ BloodHound shows POSSIBLE paths. Cross-reference with User Notes above.\n\n")
+            lines.append(bh_content + "\n")
+
+    # ── auto-extracted findings ───────────────────────────────────
+    if findings:
+        lines.append("\n# Discovered Findings\n")
+        for f in findings:
+            lines.append(f"- {f}\n")
+
+    # ── commands already run — CRITICAL — never repeat ────────────
+    if done:
+        lines.append("\n# ❌ Commands Already Executed — NEVER SUGGEST THESE AGAIN\n")
+        lines.append("These have been run. Suggesting them again wastes time.\n\n")
+        for cmd in done:
+            lines.append(f"- `{cmd}`\n")
+
+    # ── session log (compact — key findings only) ───────────────
+    log_path = os.path.join(session_dir, "session.md")
+    if os.path.exists(log_path):
+        with open(log_path) as f:
+            log = f.read().strip()
+        if log:
+            lines.append("\n# Session Log (key findings per step)\n")
+            lines.append(log + "\n")
+
+    # ── skills via @path — carregadas automaticamente pelo Claude Code ──
+    if os.path.isdir(SKILLS_DIR):
+        lines.append("\n# Skills\n")
+        for skill in sorted(os.listdir(SKILLS_DIR)):
+            skill_path = os.path.join(SKILLS_DIR, skill, "SKILL.md")
+            if os.path.exists(skill_path):
+                lines.append(f"@{skill_path}\n")
+
+
+
+    with open(os.path.join(session_dir, "CLAUDE.md"), "w") as f:
+        f.writelines(lines)
+
+
+def append_session_log(session_dir, label, findings_only):
+    """Save only key findings bullets to session.md — keeps log compact."""
+    if not findings_only:
+        return
+    with open(os.path.join(session_dir, "session.md"), "a") as f:
+        f.write(f"\n### {label}\n")
+        for b in findings_only:
+            f.write(f"- {b}\n")
+
+
+def save_bloodhound_analysis(session_dir, label, response):
+    """Persist BloodHound analysis — overwrites to keep context lean."""
+    with open(os.path.join(session_dir, "bloodhound.md"), "w") as f:
+        f.write(f"### {label}\n{response}\n")
+
+
+def call_claude(message, session_dir):
+    import threading, itertools, time
+
+    cmd = ["claude", "--dangerously-skip-permissions", "--allowedTools", "none",
+           "--add-dir", SKILLS_DIR, "-p"]
+
+    # spinner so user knows it's working
+    stop = threading.Event()
+    def spin():
+        for c in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
+            if stop.is_set(): break
+            print(f"\r  {c} thinking...", end="", flush=True)
+            time.sleep(0.1)
+        print("\r" + " " * 20 + "\r", end="", flush=True)
+
+    t = threading.Thread(target=spin, daemon=True)
+    t.start()
+    proc = subprocess.run(cmd, input=message, capture_output=True, text=True, cwd=session_dir)
+    stop.set()
+    t.join()
     return proc.stdout.strip()
 
-def display_response(response: str, label: str = ""):
+
+def display(response, label=""):
     print()
     print("━" * 60)
     if label:
@@ -43,193 +169,195 @@ def display_response(response: str, label: str = ""):
     print(response)
     print()
 
-def update_claude_md(ctx: dict):
-    """Update CLAUDE.md with system prompt + session context for caching."""
-    lines = [
-        f"{config.SYSTEM_PROMPT}\n\n",
-        "# HolyAD Session Context\n\n",
-        f"- **Target IP:** {ctx['target']}\n",
-        f"- **Type:** {ctx['type']}\n",
-    ]
-    if ctx.get('user'):
-        lines.append(f"- **Username:** {ctx['user']}\n")
-    if ctx.get('pass'):
-        lines.append(f"- **Password:** {ctx['pass']}\n")
-    if ctx.get('domain'):
-        lines.append(f"- **Domain:** {ctx['domain']}\n")
-    if ctx.get('findings'):
-        lines.append(f"\n## Findings so far\n")
-        for f in ctx['findings']:
-            lines.append(f"- {f}\n")
 
-    # write to current dir so Claude Code auto-reads it
-    with open(os.path.join(os.getcwd(), "CLAUDE.md"), "w") as f:
-        f.writelines(lines)
-
-def handle_start(args: list):
-    if not args:
-        print("usage: holyad --start <ip> [user:password]")
-        sys.exit(1)
-
-    ip = args[0]
-    credentials = args[1] if len(args) > 1 else None
-
-    session = Session()
-    session.init(ip, credentials)
-    ctx = session.load()
-    update_claude_md(ctx)
-
-    print(f"\n  session started")
-    print(f"  target : {ip}")
-    print(f"  type   : {ctx['type']}")
-    if ctx.get('user'):
-        print(f"  user   : {ctx['user']}")
-    print()
-
-def handle_report():
-    session = Session()
-    ctx = session.load()
-
-    if not ctx.get("target"):
-        print("error: no active session")
-        sys.exit(1)
-
-    message = "Generate a concise pentest report for this HTB session based on everything we've done. Include: techniques used, why they worked, what was found, and lessons learned."
-    response = send_to_claude(message, first_call=False)
-    session.save_report(response)
-    display_response(response, "session report")
-    print(f"  report saved to session/report.md")
-
-def auto_save_findings(response: str, session):
-    """Extract key findings section from Claude response and save to context."""
-    marker = "## Key findings from this analysis"
-    if marker not in response:
+def extract_findings(response, session, session_dir):
+    if "## Key findings" not in response:
         return
-
-    findings_section = response.split(marker)[-1].strip()
-    lines = findings_section.split("\n")
-
-    new_findings = []
-    for line in lines:
+    section = response.split("## Key findings")[-1].strip()
+    new = []
+    for line in section.split("\n"):
         line = line.strip()
+        if line.startswith("##"):
+            break
         if line.startswith("-") and len(line) > 2:
-            finding = line[1:].strip()
-            if finding:
-                new_findings.append(finding)
-        elif line.startswith("##"):
-            break  # stop at next section
-
-    if not new_findings:
+            f = line[1:].strip()
+            if f:
+                new.append(f)
+    if not new:
         return
-
     ctx = session.load()
     existing = ctx.get("findings", [])
-    for f in new_findings:
+    for f in new:
         if f not in existing:
             existing.append(f)
     ctx["findings"] = existing
     session.save(ctx)
-    update_claude_md(ctx)
+    write_claude_md(session_dir, ctx)
+    print(f"  [holyad] {len(new)} finding(s) saved")
 
-    print(f"  [holyad] {len(new_findings)} finding(s) saved to context")
 
-def handle_input(args: list):
-    session = Session()
+# ── handlers ──────────────────────────────────────────────────────────────────
+
+def handle_start(args):
+    if not args:
+        print("usage: holyad --start <ip> [user:password]"); sys.exit(1)
+    ip    = args[0]
+    creds = args[1] if len(args) > 1 else None
+    sdir  = session_dir_for(ip)
+    os.makedirs(sdir, exist_ok=True)
+
+    # wipe session files but keep bloodhound.md if user wants to preserve it
+    for f in ["CLAUDE.md", "last_output.txt", "session.md"]:
+        p = os.path.join(sdir, f)
+        if os.path.exists(p): os.remove(p)
+
+    session = Session(ip)
+    session.init(ip, creds)
     ctx = session.load()
+    write_claude_md(sdir, ctx)
 
+    print(f"\n  session started  →  {sdir}")
+    print(f"  target : {ip}")
+    print(f"  type   : {ctx['type']}")
+    if ctx.get('user'): print(f"  user   : {ctx['user']}")
+    print()
+
+
+def handle_add(args):
+    """Save a user note (rabbit hole, observation, confirmed fact)."""
+    if not args:
+        print('usage: holyad --add "note"'); sys.exit(1)
+    note    = " ".join(args)
+    session = Session()
+    ctx     = session.load()
     if not ctx.get("target"):
-        print("error: no active session — run 'holyad --start <ip>' first")
-        sys.exit(1)
+        print("error: no active session"); sys.exit(1)
 
-    # detect if args are all files
-    all_files = all(os.path.isfile(a) for a in args)
+    ctx.setdefault("notes", []).append(note)
+    session.save(ctx)
+    write_claude_md(session.session_dir, ctx)
+    print(f"\n  note saved: {note}\n")
+
+
+def handle_report():
+    session = Session()
+    ctx     = session.load()
+    if not ctx.get("target"):
+        print("error: no active session"); sys.exit(1)
+    sdir    = session.session_dir
+    msg     = "Generate a concise pentest report. Include: techniques used, why they worked, what was found, lessons learned."
+    response = call_claude(msg, sdir)
+    session.save_report(response)
+    display(response, "session report")
+    print(f"  report saved to {sdir}/report.md")
+
+
+def handle_input(args):
+    session = Session()
+    ctx     = session.load()
+    if not ctx.get("target"):
+        print("error: no active session — run 'holyad --start <ip>' first"); sys.exit(1)
+    sdir = session.session_dir
+
+    all_files    = all(os.path.isfile(a) for a in args)
+    is_bh        = all_files and any(is_bloodhound_file(a) for a in args)
 
     if all_files:
-        # ── file mode ────────────────────────────────────────────
+        print(f"\n  loading {len(args)} file(s)...", end="", flush=True)
         payload = ""
-        for filepath in args:
-            filename = os.path.basename(filepath)
-            with open(filepath, "r", errors="replace") as f:
-                content = f.read()
-            payload += f"=== {filename} ===\n{content}\n\n"
+        for fp in args:
+            with open(fp, "r", errors="replace") as f:
+                payload += f"=== {os.path.basename(fp)} ===\n{f.read()}\n\n"
+        print(f" {len(payload)} bytes ready")
 
-        message = f"Analyze the following tool output(s) and suggest the next step:\n\n{payload}"
+        if is_bh:
+            message = (
+                "Analyze these BloodHound files. Extract:\n"
+                "1. Attack paths to Domain Admin (shortest paths from owned users)\n"
+                "2. ACL edges: GenericAll, GenericWrite, WriteSPN, ForceChangePassword, AddSelf, DCSync\n"
+                "3. Kerberoastable / AS-REP roastable accounts\n"
+                "4. GMSA accounts and who can read them\n"
+                "5. ADCS enrollment rights\n"
+                "6. Any Pre-Windows 2000 computer accounts\n\n"
+                "Cross-reference with user notes in context — if a path is marked as rabbit hole, say so.\n\n"
+                f"{payload}"
+            )
+            label = "bloodhound: " + ", ".join(os.path.basename(a) for a in args)
+        else:
+            message = f"Analyze these files and suggest the next step:\n\n{payload}"
+            label   = "files: " + ", ".join(os.path.basename(a) for a in args)
 
     else:
-        # ── command mode ──────────────────────────────────────────
         print(f"\n  running: {' '.join(args)}\n")
-
-        # run command with live output
-        output_lines = []
+        out_lines = []
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in proc.stdout:
             print(line, end="")
-            output_lines.append(line)
+            out_lines.append(line)
         proc.wait()
-
-        output = "".join(output_lines)
+        output = "".join(out_lines)
 
         if not Filter.should_send(output, " ".join(args)):
             print("\n  [holyad] output filtered — nothing relevant to analyze")
             return
 
-        # save output to file for reference
-        outfile = os.path.join(HOLYAD_DIR, "last_output.txt")
-        with open(outfile, "w") as f:
-            f.write(f"command: {' '.join(args)}\n\n{output}")
+        cmd_str = " ".join(args)
+        ctx2    = session.load()
+        cmds    = ctx2.get("sent_commands", [])
+        if cmd_str not in cmds:
+            cmds.append(cmd_str)
+            ctx2["sent_commands"] = cmds
+            session.save(ctx2)
+            write_claude_md(sdir, ctx2)
 
-        message = f"Analyze this output and suggest the next step:\n\ncommand: {' '.join(args)}\n\n{output}"
+        with open(os.path.join(sdir, "last_output.txt"), "w") as f:
+            f.write(f"command: {cmd_str}\n\n{output}")
 
-    # first call check — if no session history yet use first_call=True
-    history_file = os.path.expanduser(f"~/.claude/projects/-{CLAUDE_MD.replace('/', '-')}/sessions-index.json")
-    first_call = not os.path.exists(history_file)
+        message = f"Analyze this output and suggest the next step:\n\ncommand: {cmd_str}\n\n{output}"
+        label   = cmd_str
 
-    response = send_to_claude(message, first_call=first_call)
+    response = call_claude(message, sdir)
     session.log_response(response)
-    display_response(response, " ".join(args))
 
-    # auto-extract and save key findings from claude's response
-    auto_save_findings(response, session)
+    # extract key findings bullets for compact session log
+    bullets = []
+    if "## Key findings" in response:
+        section = response.split("## Key findings")[-1].strip()
+        for line in section.split("\n"):
+            line = line.strip()
+            if line.startswith("##"): break
+            if line.startswith("-") and len(line) > 2:
+                bullets.append(line[1:].strip())
 
-def handle_add(args: list):
-    if not args:
-        print("usage: holyad --add \"finding description\"")
-        sys.exit(1)
+    if is_bh:
+        save_bloodhound_analysis(sdir, label, response)
+        print("  [holyad] bloodhound analysis saved to bloodhound.md")
+    else:
+        append_session_log(sdir, label, bullets)
 
-    finding = " ".join(args)
-    session = Session()
-    ctx = session.load()
+    display(response, label)
+    extract_findings(response, session, sdir)
 
-    if not ctx.get("target"):
-        print("error: no active session — run 'holyad --start <ip>' first")
-        sys.exit(1)
+    # after bloodhound, rebuild CLAUDE.md so it includes the new analysis
+    if is_bh:
+        write_claude_md(sdir, session.load())
 
-    ctx.setdefault("findings", []).append(finding)
-    session.save(ctx)
-    update_claude_md(ctx)
-
-    print(f"\n  finding saved: {finding}\n")
 
 def main():
     args = sys.argv[1:]
-
     if not args:
         print("usage:")
         print("  holyad --start <ip> [user:password]")
         print("  holyad <tool> [args...]")
-        print("  holyad file1.txt [file2.txt ...]")
+        print("  holyad file1.json [file2.json ...]")
+        print('  holyad --add "rabbit hole or observation"')
         print("  holyad --report")
-        print("  holyad --add \"finding description\"")
         sys.exit(0)
 
-    if args[0] == "--start":
-        handle_start(args[1:])
-    elif args[0] == "--report":
-        handle_report()
-    elif args[0] == "--add":
-        handle_add(args[1:])
-    else:
-        handle_input(args)
+    if   args[0] == "--start":  handle_start(args[1:])
+    elif args[0] == "--report": handle_report()
+    elif args[0] == "--add":    handle_add(args[1:])
+    else:                       handle_input(args)
 
 if __name__ == "__main__":
     main()

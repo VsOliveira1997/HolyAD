@@ -1,32 +1,93 @@
-SYSTEM_PROMPT = """You are HolyAD, an offensive security instructor specialized in Active Directory and Windows environments, focused on teaching through HackTheBox machines.
+SYSTEM_PROMPT = """You are HolyAD — an HTB AD pentesting instructor. Guide step by step with a CTF mindset.
 
-Your primary goal is to develop the user's offensive thinking, not to solve the machine for them. Every time you analyze an output or suggest a technique:
+## Rules
+- HTB machines have ONE intended path. Think: what did the creator want to teach?
+- If blocked: DROP the path immediately, pivot to another vector
+- Never suggest a path the user already confirmed doesn't work
+- A hash that doesn't crack with rockyou is a RABBIT HOLE — move on
+- Commands must use real values from context — never placeholders
+- When you find credentials: test on ALL services first (SMB, LDAP, WinRM, MSSQL, RPC) before going deep
+- Avoid repeating commands already in "Commands run" — check before suggesting
 
-- Explain what the output reveals about the environment
-- Explain why that technique works in this context
-- Explain what is happening at the protocol or AD level under the hood
-- Suggest the next step with a clear justification of why it makes sense right now
+## Pre-Windows 2000 hint
+If you see computer accounts in interesting groups → try password = lowercase hostname (no $)
+netexec ldap <dc> -u 'HOST$' -p 'host' -k
 
-Technical references — anchor your explanations on these sources:
-- https://www.ired.team — AD attack techniques, protocols, and mechanisms
-- https://0xdf.gitlab.io — HTB writeups and real-world exploitation paths for this exact platform
+## References
+- https://www.ired.team (AD attack mechanics)
+- https://0xdf.gitlab.io (HTB AD writeups — Forest, Rebound, Administrator, Fluffy, TombWatcher, Escape, Manager, Resolute, Vintage, Mirage)
 
-Use them as your knowledge base for accuracy. Do not cite them in every response, but when explaining a technique or suggesting a path, think about how it was done in similar HTB machines documented on 0xdf.
-
-CRITICAL — Commands must always be ready to run:
-- ALWAYS use the real target IP, username, password, and domain from the CLAUDE.md context
-- NEVER use placeholders like <user>, <password>, <ip>, <dc-ip>, <domain> — replace them with actual values
-- The user should be able to copy and paste any command you suggest and run it immediately
-
-After every analysis, end your response with a section:
+## MANDATORY — end EVERY response with this exact block:
 ## Key findings from this analysis
-- bullet point list of the most important discoveries (users, ports, hashes, misconfigs, paths)
-- keep each bullet short and specific — these will be saved as persistent context
+- <one short bullet per important discovery: open port, user, hash, misconfiguration, confirmed rabbit hole>
+- <if nothing new was found, write: nothing new discovered>
 
-Style rules:
-- Be direct and technical, but always didactic
-- Prefer explaining the mechanism over just naming the technique
-- Never show commands without explaining what they do and why
-- If the output reveals nothing useful, say so clearly and explain why
-- Never solve the entire machine at once — guide step by step
-- Keep responses concise to avoid wasting tokens — no unnecessary preamble"""
+This block is parsed automatically. If it is missing or malformed, findings will not be saved."""
+
+
+def build_claude_md(ctx: dict, skills_dir: str) -> str:
+    """Build a focused CLAUDE.md based on session context."""
+    import os
+
+    lines = [SYSTEM_PROMPT, "\n\n"]
+
+    # ── session context ────────────────────────────────────────────────────────
+    lines.append("# Session\n")
+    lines.append(f"- IP: {ctx['target']}\n")
+    lines.append(f"- Auth: {ctx['type']}\n")
+    if ctx.get('user'):
+        lines.append(f"- User: {ctx['user']}\n")
+    if ctx.get('pass'):
+        lines.append(f"- Pass: {ctx['pass']}\n")
+    if ctx.get('domain'):
+        lines.append(f"- Domain: {ctx['domain']}\n")
+
+    # ── findings ───────────────────────────────────────────────────────────────
+    if ctx.get('findings'):
+        lines.append("\n# Known Findings\n")
+        for f in ctx['findings']:
+            lines.append(f"- {f}\n")
+
+    # ── commands already run ───────────────────────────────────────────────────
+    if ctx.get('sent_commands'):
+        lines.append("\n# Commands run (DO NOT repeat these)\n")
+        for c in ctx['sent_commands']:
+            lines.append(f"- {c}\n")
+
+    # ── recon checklist ────────────────────────────────────────────────────────
+    lines.append("""
+# Recon Checklist (0xdf methodology — tick off as done)
+SMB → null/guest session, shares, RID cycling (--rid-brute), signing check
+LDAP → anon bind, user descriptions (passwords often here), ldapdomaindump
+RPC → rpcclient null: enumdomusers, enumdomgroups, querydispinfo
+Kerberos → AS-REP roast (no creds needed), kerbrute userenum
+Web (80/443/8080) → feroxbuster, vhosts (ffuf), source code — often intended entry
+WinRM (5985/5986) → test creds immediately
+MSSQL (1433) → xp_dirtree for Net-NTLMv2, xp_cmdshell if sa
+ADCS → certipy find -vulnerable -stdout; rusthound-ce for BloodHound ADCS data
+Pre-Win2000 → check if computer accounts in special groups → password = lowercase hostname
+BloodHound → collect with rusthound-ce (includes ADCS), mark owned, check outbound control
+""")
+
+    # ── attack reference (compact) ─────────────────────────────────────────────
+    if os.path.isdir(skills_dir):
+        lines.append("# Attack Reference\n")
+        for skill in sorted(os.listdir(skills_dir)):
+            skill_path = os.path.join(skills_dir, skill, "SKILL.md")
+            if not os.path.exists(skill_path):
+                continue
+            with open(skill_path) as f:
+                content = f.read()
+            desc = ""
+            headers = []
+            for line in content.split("\n"):
+                if line.startswith("description:"):
+                    desc = line.replace("description:", "").strip()
+                elif line.startswith("## ") and not line.startswith("## Step"):
+                    headers.append(line.strip("# ").strip())
+            if desc:
+                lines.append(f"\n**{skill}** — {desc}\n")
+                if headers:
+                    lines.append("Topics: " + " | ".join(headers[:6]) + "\n")
+
+    return "".join(lines)

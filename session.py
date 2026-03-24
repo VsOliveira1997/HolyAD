@@ -2,13 +2,36 @@ import json
 import os
 from datetime import datetime, timezone
 
-SESSION_FILE = os.path.join(os.path.expanduser("~/.holyad"), "context.json")
-REPORT_FILE  = os.path.join(os.path.expanduser("~/.holyad"), "report.md")
-LOG_FILE     = os.path.join(os.path.expanduser("~/.holyad"), "agent.log")
+HOLYAD_BASE = os.path.expanduser("~/.holyad")
+
+# active session pointer — tracks which IP is current
+ACTIVE_FILE = os.path.join(HOLYAD_BASE, "active")
+
+def get_session_dir(ip: str = None) -> str:
+    """Return session dir for given IP, or current active session."""
+    if ip:
+        return os.path.join(HOLYAD_BASE, ip)
+    if os.path.exists(ACTIVE_FILE):
+        with open(ACTIVE_FILE) as f:
+            ip = f.read().strip()
+        return os.path.join(HOLYAD_BASE, ip)
+    return None
 
 class Session:
+    def __init__(self, ip: str = None):
+        self.session_dir = get_session_dir(ip)
+
+    def _path(self, filename: str) -> str:
+        return os.path.join(self.session_dir, filename)
+
     def init(self, ip: str, credentials: str = None):
-        os.makedirs(os.path.dirname(SESSION_FILE), exist_ok=True)
+        self.session_dir = os.path.join(HOLYAD_BASE, ip)
+        os.makedirs(self.session_dir, exist_ok=True)
+        os.makedirs(HOLYAD_BASE, exist_ok=True)
+
+        # set as active session
+        with open(ACTIVE_FILE, "w") as f:
+            f.write(ip)
 
         session_type = "credentialed" if credentials else "non_credentialed"
         user, password = ("", "")
@@ -25,31 +48,37 @@ class Session:
             "sent_commands": []
         }
 
-        with open(SESSION_FILE, "w") as f:
+        with open(self._path("context.json"), "w") as f:
             json.dump(data, f, indent=2)
 
-        with open(REPORT_FILE, "w") as f:
+        with open(self._path("report.md"), "w") as f:
             f.write(f"# HTB Session Report\n")
             f.write(f"- **Target:** {ip}\n")
             f.write(f"- **Type:** {session_type}\n")
             f.write(f"- **Started:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n---\n\n")
 
     def load(self) -> dict:
-        if not os.path.exists(SESSION_FILE):
+        if not self.session_dir:
             return {}
-        with open(SESSION_FILE, "r") as f:
+        path = self._path("context.json")
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
             return json.load(f)
 
     def save(self, data: dict):
-        with open(SESSION_FILE, "w") as f:
+        with open(self._path("context.json"), "w") as f:
             json.dump(data, f, indent=2)
 
     def log_response(self, response: str):
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        with open(LOG_FILE, "a") as f:
+        with open(self._path("agent.log"), "a") as f:
             f.write(f"\n[{timestamp}]\n{response}\n")
 
     def save_report(self, content: str):
-        with open(REPORT_FILE, "a") as f:
+        with open(self._path("report.md"), "a") as f:
             f.write(f"\n## Report\n\n{content}\n")
+
+    def save_output(self, cmd: str, output: str):
+        with open(self._path("last_output.txt"), "w") as f:
+            f.write(f"command: {cmd}\n\n{output}")
