@@ -156,7 +156,7 @@ holyAD uses `claude -p` which is stateless by design. Context lives entirely in 
 holyad --add "kerberoast didn't work"
 
 # Good
-holyad --add "a.white_adm is kerberoastable but hash won't crack — strong password, not the path"
+holyad --add "user is kerberoastable but hash won't crack — strong password, not the path"
 ```
 
 **Send BloodHound early**
@@ -197,7 +197,3 @@ If a tool generates output with binary blobs (e.g. ADFSDump, encrypted keys), sa
 - https://0xdf.gitlab.io — HTB AD writeups
 
 ---
-
-## License
-
-Educational use in authorized environments (HackTheBox, personal labs) only. Do not use against systems without explicit written authorization.
