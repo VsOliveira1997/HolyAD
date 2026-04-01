@@ -7,7 +7,7 @@
 #   holyad --add "note"
 #   holyad --report
 
-import sys, os, subprocess, json
+import sys, os, subprocess, json, re
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from session import Session
@@ -20,6 +20,25 @@ SKILLS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
 BH_EXTENSIONS = {".json", ".zip"}
 BH_KEYWORDS   = {"computers", "users", "groups", "domains", "gpos", "ous",
                  "containers", "bloodhound", "sharphound", "rusthound"}
+
+# findings that are generic AD noise — not worth saving, already visible from context
+FINDINGS_NOISE = [
+    r"^port \d+",
+    r"^\d+/tcp\s+open",
+    r"^\d+/udp\s+open",
+    r"^service.*running.*port",
+    r"^(smb|ldap|kerberos|winrm|msrpc|mssql) (service|port|running)",
+    r"^target (ip|host|machine)",
+    r"^(host|ip|address)[\s:]+\d+\.\d+\.\d+\.\d+",
+    r"^nmap scan",
+    r"^open port",
+]
+_NOISE_RE = [re.compile(p, re.IGNORECASE) for p in FINDINGS_NOISE]
+
+
+def is_noisy_finding(text: str) -> bool:
+    return any(r.search(text) for r in _NOISE_RE)
+
 
 SYSTEM_PROMPT = """You are HolyAD — HTB Active Directory pentesting instructor.
 
@@ -80,6 +99,10 @@ def write_claude_md(session_dir, ctx):
         with open(bh_path) as f:
             bh_content = f.read().strip()
         if bh_content:
+            BH_MAX = 3000
+            if len(bh_content) > BH_MAX:
+                bh_content = (bh_content[:BH_MAX] +
+                    f"\n\n[... bloodhound analysis truncated — full analysis in bloodhound.md ...]")
             lines.append("\n# BloodHound Analysis\n")
             lines.append("⚠️ BloodHound shows POSSIBLE paths. Cross-reference with User Notes above.\n\n")
             lines.append(bh_content + "\n")
@@ -92,10 +115,17 @@ def write_claude_md(session_dir, ctx):
 
     # ── commands already run — CRITICAL — never repeat ────────────
     if done:
-        lines.append("\n# ❌ Commands Already Executed — NEVER SUGGEST THESE AGAIN\n")
-        lines.append("These have been run. Suggesting them again wastes time.\n\n")
-        for cmd in done:
+        lines.append("\n# ✅ Commands Analyzed by Claude — DO NOT REPEAT\n")
+        for entry in done:
+            # support both old string format and new dict format
+            cmd = entry if isinstance(entry, str) else entry.get("cmd", "")
             lines.append(f"- `{cmd}`\n")
+
+    failed = ctx.get("failed_commands", [])
+    if failed:
+        inline = ", ".join(f"`{c}`" for c in failed[-20:])
+        lines.append(f"\n# ❌ Commands With No Useful Output — DO NOT RETRY\n")
+        lines.append(f"{inline}\n")
 
     # ── session log (compact — key findings only) ───────────────
     log_path = os.path.join(session_dir, "session.md")
@@ -103,6 +133,9 @@ def write_claude_md(session_dir, ctx):
         with open(log_path) as f:
             log = f.read().strip()
         if log:
+            LOG_MAX = 2000
+            if len(log) > LOG_MAX:
+                log = "[... earlier entries trimmed — see session.md for full log ...]\n" + log[-LOG_MAX:]
             lines.append("\n# Session Log (key findings per step)\n")
             lines.append(log + "\n")
 
@@ -131,24 +164,82 @@ def save_bloodhound_analysis(session_dir, label, response):
 def call_claude(message, session_dir):
     import threading, itertools, time
 
-    cmd = ["claude", "--dangerously-skip-permissions", "--allowedTools", "Skill,Read",
-           "--add-dir", SKILLS_DIR, "-p"]
+    TIMEOUT = 120  # abort if no response in 2 minutes
 
-    # spinner so user knows it's working
+    cmd = ["claude", "--bare", "--dangerously-skip-permissions", "--allowedTools", "Skill,Read",
+           "--add-dir", SKILLS_DIR, "--output-format", "json", "-p"]
+
     stop = threading.Event()
+    start_time = time.time()
+
     def spin():
         for c in itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"):
             if stop.is_set(): break
-            print(f"\r  {c} thinking...", end="", flush=True)
+            elapsed = int(time.time() - start_time)
+            print(f"\r  {c} thinking... {elapsed}s", end="", flush=True)
             time.sleep(0.1)
-        print("\r" + " " * 20 + "\r", end="", flush=True)
+        print("\r" + " " * 30 + "\r", end="", flush=True)
 
     t = threading.Thread(target=spin, daemon=True)
     t.start()
-    proc = subprocess.run(cmd, input=message, capture_output=True, text=True, cwd=session_dir)
-    stop.set()
-    t.join()
-    return proc.stdout.strip()
+
+    try:
+        proc = subprocess.run(cmd, input=message, capture_output=True, text=True,
+                              cwd=session_dir, timeout=TIMEOUT)
+        stop.set()
+        t.join()
+    except subprocess.TimeoutExpired:
+        stop.set()
+        t.join()
+        print(f"\n  [holyad] call timed out after {TIMEOUT}s — no response received")
+        print("  tip: try again, or use 'holyad --add' to mark dead ends and trim context\n")
+        return None, {}
+
+    stdout = proc.stdout.strip()
+    if not stdout:
+        if proc.stderr.strip():
+            print(f"\n  [holyad] error: {proc.stderr.strip()[:300]}\n")
+        return None, {}
+
+    # parse JSON output for response text + token usage
+    try:
+        data = json.loads(stdout)
+        response_text = data.get("result", "").strip()
+        usage = data.get("usage", {})
+    except (json.JSONDecodeError, ValueError):
+        response_text = stdout  # fallback: treat as plain text
+        usage = {}
+
+    if not response_text:
+        return None, {}
+
+    return response_text, usage
+
+
+def print_token_info(usage, session):
+    """Display token usage for this call and update session cumulative totals."""
+    inp = usage.get("input_tokens", 0)
+    out = usage.get("output_tokens", 0)
+    if not inp and not out:
+        return
+    call_total = inp + out
+    ctx = session.load()
+    tu = ctx.get("token_usage", {"input": 0, "output": 0})
+    tu["input"]  += inp
+    tu["output"] += out
+    ctx["token_usage"] = tu
+    session.save(ctx)
+    session_total = tu["input"] + tu["output"]
+    print(f"  [tokens] this call: {inp:,} in / {out:,} out ({call_total:,} total)"
+          f"  |  session: {session_total:,}")
+
+
+def context_size_hint(session_dir):
+    """Estimate input token count from CLAUDE.md size (rough: 4 chars ≈ 1 token)."""
+    p = os.path.join(session_dir, "CLAUDE.md")
+    if not os.path.exists(p):
+        return 0
+    return os.path.getsize(p) // 4
 
 
 def display(response, label=""):
@@ -175,6 +266,8 @@ def extract_findings(response, session, session_dir):
             f = line[1:].strip()
             if f:
                 new.append(f)
+    # drop generic noise — port open, service running, etc.
+    new = [f for f in new if not is_noisy_finding(f)]
     if not new:
         return
     ctx = session.load()
@@ -238,7 +331,15 @@ def handle_report():
         print("error: no active session"); sys.exit(1)
     sdir    = session.session_dir
     msg     = "Generate a concise pentest report. Include: techniques used, why they worked, what was found, lessons learned."
-    response = call_claude(msg, sdir)
+    ctx_tokens     = context_size_hint(sdir)
+    payload_tokens = len(msg) // 4
+    total_tokens   = ctx_tokens + payload_tokens
+    print(f"  [context] ~{ctx_tokens:,} (context) + ~{payload_tokens:,} (payload) = ~{total_tokens:,} tokens going in")
+    response, usage = call_claude(msg, sdir)
+    if not response:
+        print("  [holyad] no response received — try again\n")
+        return
+    print_token_info(usage, session)
     session.save_report(response)
     display(response, "session report")
     print(f"  report saved to {sdir}/report.md")
@@ -296,15 +397,25 @@ def handle_input(args):
         proc.wait()
         output = "".join(out_lines)
 
-        if not Filter.should_send(output, " ".join(args)):
+        cmd_str = " ".join(args)
+        output  = Filter.compress(output)
+
+        if not Filter.should_send(output, cmd_str):
             print("\n  [holyad] output filtered — nothing relevant to analyze")
+            # track as failed so Claude knows not to retry
+            ctx2   = session.load()
+            failed = ctx2.get("failed_commands", [])
+            if cmd_str not in failed:
+                failed.append(cmd_str)
+                ctx2["failed_commands"] = failed
+                session.save(ctx2)
             return
 
-        cmd_str = " ".join(args)
-        ctx2    = session.load()
-        cmds    = ctx2.get("sent_commands", [])
-        if cmd_str not in cmds:
-            cmds.append(cmd_str)
+        ctx2  = session.load()
+        cmds  = ctx2.get("sent_commands", [])
+        known = [e if isinstance(e, str) else e.get("cmd", "") for e in cmds]
+        if cmd_str not in known:
+            cmds.append({"cmd": cmd_str, "status": "success"})
             ctx2["sent_commands"] = cmds
             session.save(ctx2)
             write_claude_md(sdir, ctx2)
@@ -313,7 +424,7 @@ def handle_input(args):
             f.write(f"command: {cmd_str}\n\n{output}")
 
         # truncate large outputs — blobs, hashes, base64 blow up tokens
-        MAX_CHARS = 8000
+        MAX_CHARS = 6000  # tighter now that output is already compressed
         if len(output) > MAX_CHARS:
             half = MAX_CHARS // 2
             output_trimmed = (output[:half] +
@@ -326,7 +437,15 @@ def handle_input(args):
         message = f"Analyze this output and suggest the next step:\n\ncommand: {cmd_str}\n\n{output_trimmed}"
         label   = cmd_str
 
-    response = call_claude(message, sdir)
+    ctx_tokens     = context_size_hint(sdir)
+    payload_tokens = len(message) // 4
+    total_tokens   = ctx_tokens + payload_tokens
+    print(f"  [context] ~{ctx_tokens:,} (context) + ~{payload_tokens:,} (payload) = ~{total_tokens:,} tokens going in")
+    response, usage = call_claude(message, sdir)
+    if not response:
+        print("  [holyad] no response received — try again\n")
+        return
+    print_token_info(usage, session)
     session.log_response(response)
 
     # extract key findings bullets for compact session log
@@ -353,11 +472,31 @@ def handle_input(args):
         write_claude_md(sdir, session.load())
 
 
+def handle_status():
+    session = Session()
+    ctx     = session.load()
+    if not ctx.get("target"):
+        print("error: no active session"); sys.exit(1)
+    sdir = session.session_dir
+    tu   = ctx.get("token_usage", {"input": 0, "output": 0})
+    session_total = tu["input"] + tu["output"]
+    ctx_tokens    = context_size_hint(sdir)
+    print(f"\n  target   : {ctx['target']}")
+    print(f"  tokens   : {session_total:,} used this session  (in: {tu['input']:,}  out: {tu['output']:,})")
+    print(f"  context  : ~{ctx_tokens:,} tokens queued for next call")
+    print(f"  findings : {len(ctx.get('findings', []))}")
+    print(f"  commands : {len(ctx.get('sent_commands', []))} tracked")
+    if ctx.get("notes"):
+        print(f"  notes    : {len(ctx['notes'])}")
+    print()
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         print("usage:")
         print("  holyad --start <ip> [user:password]")
+        print("  holyad --status")
         print("  holyad <tool> [args...]")
         print("  holyad file1.json [file2.json ...]")
         print('  holyad --add "rabbit hole or observation"')
@@ -367,6 +506,7 @@ def main():
     if   args[0] == "--start":  handle_start(args[1:])
     elif args[0] == "--report": handle_report()
     elif args[0] == "--add":    handle_add(args[1:])
+    elif args[0] == "--status": handle_status()
     else:                       handle_input(args)
 
 if __name__ == "__main__":

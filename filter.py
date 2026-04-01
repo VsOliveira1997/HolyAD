@@ -1,6 +1,21 @@
 import re
 
 class Filter:
+    # ANSI escape codes, carriage returns, repeated separators
+    _ANSI_RE      = re.compile(r'\x1b\[[0-9;]*[mGKHFJA-Z]')
+    _SEP_LINE_RE  = re.compile(r'^[=\-#\*_]{5,}\s*$', re.MULTILINE)
+    _BLANK_RE     = re.compile(r'\n{3,}')
+
+    @classmethod
+    def compress(cls, output: str) -> str:
+        """Strip formatting noise — ANSI codes, blank lines, separator lines."""
+        output = cls._ANSI_RE.sub('', output)
+        output = output.replace('\r', '')
+        output = '\n'.join(line.rstrip() for line in output.split('\n'))
+        output = cls._SEP_LINE_RE.sub('', output)
+        output = cls._BLANK_RE.sub('\n\n', output)
+        return output.strip()
+
     # signals that indicate a meaningful discovery
     SIGNALS = [
         # network
@@ -33,6 +48,7 @@ class Filter:
 
     @classmethod
     def should_send(cls, output: str, command: str = "") -> bool:
+        output = cls.compress(output)
         output_lower = output.lower().strip()
 
         # layer 1: empty output
