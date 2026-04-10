@@ -15,7 +15,7 @@ netexec ldap <dc> -u 'HOST$' -p 'host' -k
 
 ## References
 - https://www.ired.team (AD attack mechanics)
-- https://0xdf.gitlab.io (HTB AD writeups — Forest, Rebound, Administrator, Fluffy, TombWatcher, Escape, Manager, Resolute, Vintage, Mirage)
+- https://0xdf.gitlab.io
 
 ## MANDATORY — end EVERY response with this exact block:
 ## Key findings from this analysis
@@ -56,17 +56,24 @@ def build_claude_md(ctx: dict, skills_dir: str) -> str:
 
     # ── recon checklist ────────────────────────────────────────────────────────
     lines.append("""
-# Recon Checklist (0xdf methodology — tick off as done)
+# Recon Checklist
 SMB → null/guest session, shares, RID cycling (--rid-brute), signing check
 LDAP → anon bind, user descriptions (passwords often here), ldapdomaindump
 RPC → rpcclient null: enumdomusers, enumdomgroups, querydispinfo
 Kerberos → AS-REP roast (no creds needed), kerbrute userenum
 Web (80/443/8080) → feroxbuster, vhosts (ffuf), source code — often intended entry
 WinRM (5985/5986) → test creds immediately
-MSSQL (1433) → xp_dirtree for Net-NTLMv2, xp_cmdshell if sa
+MSSQL (1433) → xp_dirtree for Net-NTLMv2, xp_cmdshell if sa; linked servers for lateral movement
 ADCS → certipy find -vulnerable -stdout; rusthound-ce for BloodHound ADCS data
 Pre-Win2000 → check if computer accounts in special groups → password = lowercase hostname
 BloodHound → collect with rusthound-ce (includes ADCS), mark owned, check outbound control
+SYSVOL/GPP → netexec smb -M gpp_password; grep NETLOGON scripts for hardcoded creds
+Shares → spider_plus all shares; grep for web.config, *.ps1, *.ini, connection strings
+IPv6 → mitm6 + ntlmrelayx --delegate-access; works on almost every domain
+PSO → check Fine-Grained Password Policies before spraying (service accounts may have lockout=0)
+Local admin reuse → netexec smb subnet/24 -u administrator -H {HASH} --local-auth
+Token privs → after any service shell: whoami /priv → SeImpersonate → GodPotato/PrintSpoofer
+Services/tasks → check for domain accounts running services/scheduled tasks → token impersonation
 """)
 
     # ── attack reference (compact) ─────────────────────────────────────────────

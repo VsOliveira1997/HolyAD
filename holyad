@@ -12,6 +12,7 @@ import sys, os, subprocess, json, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from session import Session
 from filter import Filter
+from orchestrator import Orchestrator, container_running, start_container, kill_container, CONTAINER_NAME
 
 HOLYAD_BASE = os.path.expanduser("~/.holyad")
 SKILLS_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
@@ -42,11 +43,36 @@ def is_noisy_finding(text: str) -> bool:
 
 SYSTEM_PROMPT = """You are HolyAD — HTB Active Directory pentesting instructor.
 
-Rules:
+## How to decide what to do next
+
+Base every decision on what ports are open. The ports tell you what to attack.
+
+| Port open | What to do |
+|-----------|-----------|
+| 445 | SMB: null session, shares, RID brute, GPP, spider shares |
+| 389/636 | LDAP: anon bind, users, descriptions (passwords hidden there!), LAPS |
+| 88 | Kerberos: AS-REP roast (no creds), kerbrute user enum |
+| 5985/5986 | WinRM: test creds if you have them |
+| 1433 | MSSQL: guest auth, xp_dirtree for Net-NTLMv2, linked servers |
+| 80/443 | Web: feroxbuster, vhosts, /certsrv, source code — often the entry point |
+| 135 | RPC: rpcclient null session, user/group enum |
+
+## When you have credentials
+1. Validate against SMB first (always responds, confirms if cred is valid)
+2. Check what ports are open — test creds against each relevant service
+3. If 5985 open → test WinRM. If 1433 open → test MSSQL. Etc.
+4. Never jump straight to escalation paths without testing all open services first.
+
+## Hard rules
+- NEVER suggest a command already in "Commands Analyzed" — find another path.
+- NEVER suggest a command in "Commands With No Useful Output" — it failed, move on.
 - HTB machines have ONE intended path. Think: what did the creator want to teach?
-- If a path is blocked or marked as rabbit hole: DROP IT IMMEDIATELY, never return to it.
+- BloodHound shows POSSIBLE paths — not guaranteed. Cross-reference with user notes.
 - Commands must use real values from context — never placeholders.
-- BloodHound shows POSSIBLE paths, not guaranteed ones. Cross-reference with --add notes.
+- rockyou fails on a hash → it is a rabbit hole. Pivot immediately.
+
+## Response format
+- One concrete next step only — not a list of options.
 - End every response with:
 ## Key findings
 - one bullet per new discovery (users, ports, hashes, ACLs, misconfigs, credentials)
@@ -103,8 +129,8 @@ def write_claude_md(session_dir, ctx):
             if len(bh_content) > BH_MAX:
                 bh_content = (bh_content[:BH_MAX] +
                     f"\n\n[... bloodhound analysis truncated — full analysis in bloodhound.md ...]")
-            lines.append("\n# BloodHound Analysis\n")
-            lines.append("⚠️ BloodHound shows POSSIBLE paths. Cross-reference with User Notes above.\n\n")
+            lines.append("\n# BloodHound Attack Paths (reference only — no commands, use current session credentials)\n")
+            lines.append("⚠️ These are POSSIBLE paths from the graph. Cross-reference with User Notes above.\n\n")
             lines.append(bh_content + "\n")
 
     # ── auto-extracted findings ───────────────────────────────────
@@ -161,13 +187,27 @@ def save_bloodhound_analysis(session_dir, label, response):
         f.write(f"### {label}\n{response}\n")
 
 
-def call_claude(message, session_dir):
+AUTH_ERROR_SIGNALS = ["401", "unauthorized", "unauthenticated", "login required",
+                      "session expired", "invalid token", "auth"]
+
+
+def _is_auth_error(stderr: str) -> bool:
+    low = stderr.lower()
+    return any(sig in low for sig in AUTH_ERROR_SIGNALS)
+
+
+def refresh_sso():
+    """Trigger interactive browser SSO re-auth and wait for the user to complete it."""
+    print("\n  [holyad] session token expired — launching browser login...")
+    print("  Complete the login in your browser, then press Enter to continue.\n")
+    subprocess.run(["claude", "auth", "login"], check=False)
+    input("  Press Enter once you've logged in: ")
+    print()
+
+
+def _run_claude(cmd, message, session_dir, timeout, env):
+    """Run the claude subprocess and return (proc, timed_out)."""
     import threading, itertools, time
-
-    TIMEOUT = 120  # abort if no response in 2 minutes
-
-    cmd = ["claude", "--bare", "--dangerously-skip-permissions", "--allowedTools", "Skill,Read",
-           "--add-dir", SKILLS_DIR, "--output-format", "json", "-p"]
 
     stop = threading.Event()
     start_time = time.time()
@@ -185,15 +225,48 @@ def call_claude(message, session_dir):
 
     try:
         proc = subprocess.run(cmd, input=message, capture_output=True, text=True,
-                              cwd=session_dir, timeout=TIMEOUT)
+                              cwd=session_dir, timeout=timeout, env=env)
         stop.set()
         t.join()
+        return proc, False
     except subprocess.TimeoutExpired:
         stop.set()
         t.join()
+        return None, True
+
+
+def call_claude(message, session_dir, timeout=120):
+    import time
+
+    TIMEOUT = timeout  # caller can override for heavy analysis (e.g. bloodhound)
+
+    cmd = ["claude", "--dangerously-skip-permissions", "--allowedTools", "Skill,Read",
+           "--add-dir", SKILLS_DIR, "--output-format", "json", "-p"]
+
+    env = os.environ.copy()
+    env_file = os.path.join(HOLYAD_BASE, ".env")
+    if os.path.exists(env_file):
+        with open(env_file) as _ef:
+            for line in _ef:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v.strip()
+
+    proc, timed_out = _run_claude(cmd, message, session_dir, TIMEOUT, env)
+
+    if timed_out:
         print(f"\n  [holyad] call timed out after {TIMEOUT}s — no response received")
         print("  tip: try again, or use 'holyad --add' to mark dead ends and trim context\n")
         return None, {}
+
+    # detect 401 / expired SSO token → re-auth and retry once
+    if proc.returncode != 0 and _is_auth_error(proc.stderr):
+        refresh_sso()
+        proc, timed_out = _run_claude(cmd, message, session_dir, TIMEOUT, env)
+        if timed_out:
+            print(f"\n  [holyad] call timed out after {TIMEOUT}s — no response received\n")
+            return None, {}
 
     stdout = proc.stdout.strip()
     if not stdout:
@@ -372,14 +445,23 @@ def handle_input(args):
 
         if is_bh:
             message = (
-                "Analyze these BloodHound files. Extract:\n"
-                "1. Attack paths to Domain Admin (shortest paths from owned users)\n"
-                "2. ACL edges: GenericAll, GenericWrite, WriteSPN, ForceChangePassword, AddSelf, DCSync\n"
-                "3. Kerberoastable / AS-REP roastable accounts\n"
-                "4. GMSA accounts and who can read them\n"
-                "5. ADCS enrollment rights\n"
-                "6. Any Pre-Windows 2000 computer accounts\n\n"
-                "Cross-reference with user notes in context — if a path is marked as rabbit hole, say so.\n\n"
+                "Analyze these BloodHound files and map all attack paths.\n\n"
+                "IMPORTANT: Output ONLY paths and relationships — NO commands, NO credentials, NO tool syntax.\n"
+                "Use principal names from the data but never fill in passwords or session credentials.\n"
+                "The output will be saved as a persistent reference and reused across sessions.\n\n"
+                "Format each path as a chain:\n"
+                "  PRINCIPAL --[EDGE]--> TARGET --[EDGE]--> GOAL\n\n"
+                "Cover:\n"
+                "1. All paths to Domain Admin from any non-admin principal (shortest first, then multi-hop)\n"
+                "2. ACL edges per principal: GenericAll, GenericWrite, WriteSPN, ForceChangePassword, AddSelf, WriteDACL, AddKeyCredentialLink\n"
+                "3. Group memberships that grant direct access: Remote Management Users, Backup Operators, DNSAdmins, Server Operators\n"
+                "4. Kerberoastable accounts (has SPN, not a gMSA)\n"
+                "5. AS-REP roastable accounts (no pre-auth)\n"
+                "6. GMSA accounts and which principals can read their password\n"
+                "7. ADCS enrollment rights (template name + who can enroll)\n"
+                "8. Computers with unconstrained / constrained delegation\n"
+                "9. Pre-Windows 2000 computer accounts\n\n"
+                "Cross-reference with user notes in context — mark any known rabbit holes.\n\n"
                 f"{payload}"
             )
             label = "bloodhound: " + ", ".join(os.path.basename(a) for a in args)
@@ -441,7 +523,8 @@ def handle_input(args):
     payload_tokens = len(message) // 4
     total_tokens   = ctx_tokens + payload_tokens
     print(f"  [context] ~{ctx_tokens:,} (context) + ~{payload_tokens:,} (payload) = ~{total_tokens:,} tokens going in")
-    response, usage = call_claude(message, sdir)
+    timeout = 600 if is_bh else 300
+    response, usage = call_claude(message, sdir, timeout=timeout)
     if not response:
         print("  [holyad] no response received — try again\n")
         return
@@ -472,6 +555,41 @@ def handle_input(args):
         write_claude_md(sdir, session.load())
 
 
+def handle_shell():
+    """Attach interactively to the running container."""
+    if not container_running():
+        print("  [docker] container not running — starting...")
+        if not start_container():
+            sys.exit(1)
+    # replace current process with docker exec
+    os.execvp("docker", ["docker", "exec", "-it", CONTAINER_NAME, "bash"])
+
+
+def handle_kill():
+    """Stop and remove the container."""
+    kill_container()
+
+
+def handle_auto(args):
+    max_steps  = 0
+    seed_files = []
+
+    for arg in args:
+        if os.path.isfile(arg):
+            seed_files.append(arg)
+        else:
+            try:
+                max_steps = int(arg)
+            except ValueError:
+                print(f"usage: holyad --auto [max-steps] [file1 file2 ...]"); sys.exit(1)
+
+    session = Session()
+    sdir    = session.session_dir
+    if not sdir:
+        print("error: no active session — run 'holyad --start <ip>' first"); sys.exit(1)
+    Orchestrator(session, sdir).run(max_steps=max_steps, seed_files=seed_files or None)
+
+
 def handle_status():
     session = Session()
     ctx     = session.load()
@@ -497,6 +615,13 @@ def main():
         print("usage:")
         print("  holyad --start <ip> [user:password]")
         print("  holyad --status")
+        print("  holyad --auto                        # runs until done")
+        print("  holyad --auto 10                     # hard limit of 10 steps")
+        print("  holyad --auto 50 nmap.txt            # seed with existing output")
+        print("  holyad --auto nmap.txt enum.txt      # multiple files, no step limit")
+        print("  holyad --up                          # start container manually")
+        print("  holyad --shell                       # open shell inside container")
+        print("  holyad --kill                        # stop and remove container")
         print("  holyad <tool> [args...]")
         print("  holyad file1.json [file2.json ...]")
         print('  holyad --add "rabbit hole or observation"')
@@ -507,6 +632,14 @@ def main():
     elif args[0] == "--report": handle_report()
     elif args[0] == "--add":    handle_add(args[1:])
     elif args[0] == "--status": handle_status()
+    elif args[0] == "--auto":   handle_auto(args[1:])
+    elif args[0] == "--shell":  handle_shell()
+    elif args[0] == "--kill":   handle_kill()
+    elif args[0] == "--up":
+        if container_running():
+            print(f"  [docker] container already running")
+        else:
+            start_container()
     else:                       handle_input(args)
 
 if __name__ == "__main__":

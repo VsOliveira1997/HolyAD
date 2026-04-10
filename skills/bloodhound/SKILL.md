@@ -13,9 +13,9 @@ If a path is marked as rabbit hole → skip it entirely, never revisit.
 
 ## Collect
 ```bash
+bloodhound-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip
+bloodhound-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip -k   # Kerberos-only env
 rusthound-ce -d {DOMAIN} -u '{USER}' -p '{PASS}' --dc-ip {IP} --zip      # includes ADCS nodes
-bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip
-bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip -k   # Kerberos-only env
 # On Windows: SharpHound.exe -c all --zipfilename bh.zip
 ```
 
@@ -51,7 +51,7 @@ bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip -
 | WriteAccountRestrictions | Write msDS-AllowedToActOnBehalfOfOtherIdentity → RBCD directly |
 | AllowedToDelegate | S4U2Self+S4U2Proxy → impersonate any user to target service |
 | AllowedToAct | RBCD — attacker machine account can impersonate any user |
-| DCSync | Dump all hashes (secretsdump -just-dc) |
+| DCSync | Dump all hashes (secretsdump.py -just-dc) |
 | ReadLAPSPassword | Read ms-Mcs-AdmPwd → local admin cred for target computer |
 | SyncLAPSPassword | Sync LAPS passwords domain-wide without full DCSync |
 | Contains (OU) | GPO linked to OU → affects all objects inside |
@@ -71,9 +71,9 @@ bloodhound-ce-python -c all -d {DOMAIN} -u '{USER}' -p '{PASS}' -ns {IP} --zip -
 GenericAll on user → shadow cred → certipy auth → NT hash → PTH
 GenericWrite on user → WriteSPN → targeted kerberoast → crack → new creds
 AddKeyCredentialLink on user → pywhisker/certipy shadow → PKINIT → UnPAC-the-Hash → NT hash
-WriteDACL on domain → grant DCSync → secretsdump → all hashes
+WriteDACL on domain → grant DCSync → secretsdump.py → all hashes
 ReadGMSAPassword → GMSA$ NT hash → PTH → check GMSA$ outbound rights
-WriteAccountRestrictions on computer → RBCD → getST → psexec
+WriteAccountRestrictions on computer → RBCD → getST.py → psexec.py
 AllExtendedRights → either ReadLAPS or ForceChangePassword depending on object type
 GenericAll on GPO → pygpoabuse → localadmin on all computers in linked OU
 DCSync → dump krbtgt → Golden Ticket → persistence
@@ -86,6 +86,47 @@ Bidirectional trust = both domains may be exploitable
 One-way trust: if you own the trusting domain, you can access the trusted one
 SID filtering: if disabled, SID history abuse is possible cross-forest
 External trusts: limited; forest trusts: broader access possible
+```
+
+## Group memberships that grant direct access
+| Group | What it means |
+|-------|--------------|
+| Remote Management Users | Evil-WinRM access → check this FIRST when you have creds |
+| Backup Operators | SeBackupPrivilege → dump SAM/SYSTEM, read any file |
+| Account Operators | Create/modify non-admin accounts and groups |
+| Server Operators | Start/stop services, logon locally to DC → modify service binary path → SYSTEM |
+| Print Operators | Load unsigned drivers as SYSTEM on DC |
+| DNSAdmins | Inject DLL into DNS service → SYSTEM on DC |
+| DnsAdmins | Same as above |
+| Remote Desktop Users | RDP access to the machine |
+| Distributed COM Users | DCOM-based lateral movement |
+
+## Less-obvious BloodHound queries
+```
+# Find computers where owned users have local admin (direct path to pivot)
+Analysis → "Find Shortest Paths to Domain Admins" with intermediate nodes
+Analysis → "Computers where [owned user] is local admin"
+
+# Find all users with path to DA via ANY edge type
+Cypher: MATCH p=shortestPath((u:User {owned:true})-[*1..]->(g:Group {name:"DOMAIN ADMINS@{DOMAIN}"})) RETURN p
+
+# Find kerberoastable users with a path to DA
+Analysis → "Find Kerberoastable Users with Most Privileges"
+
+# Unconstrained delegation computers (DC coercion target)
+Analysis → "Find Computers with Unconstrained Delegation" → exclude DCs themselves
+
+# Find all principals with DCSync rights (not just DAs)
+Analysis → "Find Principals with DCSync Rights"
+
+# Find service accounts (have SPN + not machine accounts)
+Cypher: MATCH (u:User) WHERE u.hasspn=true AND NOT u.name ENDS WITH '$' RETURN u.name
+
+# Find machines with LAPS not deployed (ms-Mcs-AdmPwd absent)
+Analysis → "Find Computers without LAPS"
+
+# Find users that share group membership with DA
+Cypher: MATCH (u:User)-[:MemberOf*1..]->(g:Group)-[:MemberOf*0..]->(da:Group {name:"DOMAIN ADMINS@{DOMAIN}"}) RETURN u.name,g.name
 ```
 
 ## Gotchas
